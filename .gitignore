@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+data/*.db
+reports/daily/*.md
+reports/daily/*.html
+reports/weekly/*.md
+reports/weekly/*.html
+exports/*.json

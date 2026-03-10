@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-monitor"
+version = "0.1.0"
+description = "Local paper monitor for arXiv, DBLP and Google Scholar alerts."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Codex" }]
+dependencies = []
+
+[project.scripts]
+paper-monitor = "paper_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["paper_monitor*"]

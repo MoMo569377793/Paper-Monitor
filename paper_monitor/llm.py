@@ -8,6 +8,7 @@ import time
 import http.client
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from paper_monitor.models import (
@@ -47,45 +48,49 @@ class LLMClient:
         if not self.enabled:
             return None
 
-        prefer_compact = self._prefers_compact_mode()
         parsed = None
         usage: dict[str, Any] = {}
-        if prefer_compact:
-            parsed, usage = self._request_structured_json(
-                system_prompt=(
-                    self._paper_summary_system_prompt()
-                    + " 不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
-                ),
-                user_prompt=self._build_compact_paper_prompt(paper, evaluations),
-                schema_name="paper_summary",
-                schema=self._paper_summary_schema(),
-                max_output_tokens=max(self.config.max_output_tokens, 1200),
-            )
+        fulltext = self._load_fulltext_text(paper)
+        if fulltext:
+            parsed, usage = self._generate_summary_from_fulltext(paper, evaluations, fulltext)
         if not parsed:
-            parsed, usage = self._request_structured_json(
-                system_prompt=self._paper_summary_system_prompt(),
-                user_prompt=self._build_paper_prompt(paper, evaluations),
-                schema_name="paper_summary",
-                schema=self._paper_summary_schema(),
-            )
-        if not parsed and not prefer_compact:
-            parsed, usage = self._request_structured_json(
-                system_prompt=(
-                    self._paper_summary_system_prompt()
-                    + " 不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
-                ),
-                user_prompt=self._build_compact_paper_prompt(paper, evaluations),
-                schema_name="paper_summary",
-                schema=self._paper_summary_schema(),
-                max_output_tokens=max(self.config.max_output_tokens, 1200),
-            )
+            prefer_compact = self._prefers_compact_mode()
+            if prefer_compact:
+                parsed, usage = self._request_structured_json(
+                    system_prompt=(
+                        self._paper_summary_system_prompt()
+                        + " 不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
+                    ),
+                    user_prompt=self._build_compact_paper_prompt(paper, evaluations),
+                    schema_name="paper_summary",
+                    schema=self._paper_summary_schema(),
+                    max_output_tokens=max(self.config.max_output_tokens, 1200),
+                )
+            if not parsed:
+                parsed, usage = self._request_structured_json(
+                    system_prompt=self._paper_summary_system_prompt(),
+                    user_prompt=self._build_paper_prompt(paper, evaluations),
+                    schema_name="paper_summary",
+                    schema=self._paper_summary_schema(),
+                )
+            if not parsed and not prefer_compact:
+                parsed, usage = self._request_structured_json(
+                    system_prompt=(
+                        self._paper_summary_system_prompt()
+                        + " 不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
+                    ),
+                    user_prompt=self._build_compact_paper_prompt(paper, evaluations),
+                    schema_name="paper_summary",
+                    schema=self._paper_summary_schema(),
+                    max_output_tokens=max(self.config.max_output_tokens, 1200),
+                )
         if not parsed:
             return None
 
         parsed["usage"] = usage
         tags = unique_strings(parsed.get("tags", []))
         summary_text = self._compose_summary(parsed)
-        basis = self._normalize_basis(parsed.get("basis"), has_fulltext=bool(paper.fulltext_excerpt))
+        basis = self._normalize_basis(parsed.get("basis"), has_fulltext=bool(fulltext or paper.fulltext_excerpt))
         return LLMResult(
             summary_text=summary_text,
             summary_basis=basis,
@@ -185,6 +190,73 @@ class LLMClient:
         if not content:
             return None, usage
         parsed = self._parse_response_json(content)
+        if parsed is None:
+            repaired, repair_usage = self._repair_response_json(content, schema_name, schema)
+            if repaired is not None:
+                return repaired, self._merge_usage_items([usage, repair_usage])
+            return None, self._merge_usage_items([usage])
+        if isinstance(parsed, dict) and isinstance(parsed.get(schema_name), dict):
+            return parsed.get(schema_name), usage
+        return parsed, usage
+
+    def _request_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        if self.provider in {"openai_responses", "openai", "responses"}:
+            content, usage = self._post_responses_text(
+                system_prompt,
+                user_prompt,
+                max_output_tokens=max_output_tokens,
+            )
+        else:
+            content, usage = self._post_chat_completions_text(
+                system_prompt,
+                user_prompt,
+                max_output_tokens=max_output_tokens,
+            )
+        if not content:
+            return None, usage
+        return THINK_TAG_RE.sub("", str(content)).strip() or None, usage
+
+    def _repair_response_json(
+        self,
+        content: str,
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        repair_system = (
+            "你是一个 JSON 修复助手。"
+            "你会把给定内容重写为严格符合 schema 的 JSON。"
+            "不要输出解释，不要输出 Markdown，不要输出<think>标签，只输出最终 JSON。"
+        )
+        repair_user = (
+            f"请把下面这段输出修复为严格合法的 JSON，对象名为 {schema_name}。\n"
+            f"必须遵守以下 JSON Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
+            f"原始输出:\n{shorten(content, 8000)}"
+        )
+        if self.provider in {"openai_responses", "openai", "responses"}:
+            repaired_text, usage = self._post_responses(
+                repair_system,
+                repair_user,
+                schema_name,
+                schema,
+                max_output_tokens=max(self.config.max_output_tokens, 1000),
+            )
+        else:
+            repaired_text, usage = self._post_chat_completions(
+                repair_system,
+                repair_user,
+                schema_name,
+                schema,
+                max_output_tokens=max(self.config.max_output_tokens, 1000),
+            )
+        if not repaired_text:
+            return None, usage
+        parsed = self._parse_response_json(repaired_text)
         if isinstance(parsed, dict) and isinstance(parsed.get(schema_name), dict):
             return parsed.get(schema_name), usage
         return parsed, usage
@@ -224,6 +296,34 @@ class LLMClient:
             content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
         return str(content), self._parse_usage(data)
 
+    def _post_chat_completions_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        payload = {
+            "model": self.config.model,
+            "temperature": self.config.temperature,
+            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        data = self._post_json(self.config.base_url.rstrip("/") + "/chat/completions", payload)
+        if not data:
+            return None, {}
+        choices = data.get("choices", [])
+        if not choices:
+            return None, self._parse_usage(data)
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+        return str(content), self._parse_usage(data)
+
     def _post_responses(
         self,
         system_prompt: str,
@@ -248,6 +348,26 @@ class LLMClient:
                     "strict": True,
                 }
             },
+        }
+        data = self._post_json(self.config.base_url.rstrip("/") + "/responses", payload)
+        if not data:
+            return None, {}
+        return self._extract_responses_text(data), self._parse_usage(data)
+
+    def _post_responses_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        payload = {
+            "model": self.config.model,
+            "instructions": system_prompt,
+            "input": user_prompt,
+            "temperature": self.config.temperature,
+            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "store": self.config.store,
         }
         data = self._post_json(self.config.base_url.rstrip("/") + "/responses", payload)
         if not data:
@@ -381,12 +501,151 @@ class LLMClient:
             return ""
         return body.strip()
 
-    def _build_paper_prompt(self, paper: PaperRecord, evaluations: list[TopicEvaluation]) -> str:
-        relevant_topics = [item for item in evaluations if item.classification != "irrelevant"]
-        topics_text = "\n".join(
-            f"- {item.topic_name} / score={item.score} / keywords={', '.join(item.matched_keywords[:6])}"
-            for item in relevant_topics[:3]
+    def _generate_summary_from_fulltext(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        fulltext: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        chunks = self._chunk_fulltext(fulltext)
+        if not chunks:
+            return None, {}
+
+        usage_items: list[dict[str, Any]] = []
+        chunk_notes: list[str] = []
+        for chunk_index, chunk_text in enumerate(chunks, start=1):
+            note_text, usage = self._request_text(
+                system_prompt=self._paper_chunk_system_prompt(),
+                user_prompt=self._build_paper_chunk_prompt(
+                    paper,
+                    evaluations,
+                    chunk_text,
+                    chunk_index=chunk_index,
+                    chunk_total=len(chunks),
+                ),
+                max_output_tokens=max(600, min(self.config.max_output_tokens, 900)),
+            )
+            usage_items.append(usage)
+            if note_text:
+                chunk_notes.append(f"分块 {chunk_index}/{len(chunks)}\n{note_text.strip()}")
+
+        if not chunk_notes:
+            return None, self._merge_usage_items(usage_items)
+
+        parsed, usage = self._request_structured_json(
+            system_prompt=self._paper_reduce_system_prompt(),
+            user_prompt=self._build_paper_reduce_prompt(paper, evaluations, chunk_notes),
+            schema_name="paper_summary",
+            schema=self._paper_summary_schema(),
+            max_output_tokens=max(self.config.max_output_tokens, 1200),
         )
+        usage_items.append(usage)
+        if not parsed:
+            return None, self._merge_usage_items(usage_items)
+
+        parsed["chunk_count"] = len(chunks)
+        parsed["source_mode"] = "fulltext_txt"
+        return parsed, self._merge_usage_items(usage_items)
+
+    def _load_fulltext_text(self, paper: PaperRecord) -> str:
+        path_text = (paper.fulltext_txt_path or "").strip()
+        if not path_text:
+            return ""
+        try:
+            fulltext = Path(path_text).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            LOGGER.warning("failed to read fulltext for paper_id=%s: %s", paper.id, exc)
+            return ""
+        return fulltext.strip()
+
+    def _chunk_fulltext(self, fulltext: str) -> list[str]:
+        text = fulltext.strip()
+        if not text:
+            return []
+        chunk_chars = max(2000, min(self.config.fulltext_chunk_chars, self.config.max_input_chars))
+        overlap_chars = max(0, min(self.config.fulltext_chunk_overlap_chars, chunk_chars // 3))
+        max_chunks = max(1, self.config.fulltext_max_chunks)
+        if len(text) <= chunk_chars:
+            return [text]
+
+        chunks: list[str] = []
+        start = 0
+        text_length = len(text)
+        while start < text_length and len(chunks) < max_chunks:
+            end = min(text_length, start + chunk_chars)
+            if end < text_length:
+                boundary = self._find_chunk_boundary(text, start, end)
+                if boundary > start:
+                    end = boundary
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= text_length:
+                break
+            next_start = max(end - overlap_chars, start + 1)
+            if next_start <= start:
+                next_start = end
+            start = next_start
+        return chunks
+
+    def _find_chunk_boundary(self, text: str, start: int, end: int) -> int:
+        minimum = start + max((end - start) // 2, 1)
+        candidates = [
+            text.rfind("\n\n", minimum, end),
+            text.rfind("\n", minimum, end),
+            text.rfind("。", minimum, end),
+            text.rfind("！", minimum, end),
+            text.rfind("？", minimum, end),
+            text.rfind(".", minimum, end),
+        ]
+        boundary = max(candidates)
+        if boundary == -1:
+            return end
+        if text[boundary : boundary + 2] == "\n\n":
+            return boundary + 2
+        return boundary + 1
+
+    def _merge_usage_items(self, usage_items: list[dict[str, Any]]) -> dict[str, Any]:
+        merged: dict[str, Any] = {"calls": len(usage_items)}
+        input_tokens = 0
+        output_tokens = 0
+        total_tokens = 0
+        has_input = False
+        has_output = False
+        has_total = False
+        raw_items: list[dict[str, Any]] = []
+        for usage in usage_items:
+            if not isinstance(usage, dict):
+                continue
+            raw_items.append(usage)
+            if "input_tokens" in usage:
+                has_input = True
+                input_tokens += int(usage.get("input_tokens") or 0)
+            if "output_tokens" in usage:
+                has_output = True
+                output_tokens += int(usage.get("output_tokens") or 0)
+            if "total_tokens" in usage:
+                has_total = True
+                total_tokens += int(usage.get("total_tokens") or 0)
+        if has_input:
+            merged["input_tokens"] = input_tokens
+        if has_output:
+            merged["output_tokens"] = output_tokens
+        if has_total:
+            merged["total_tokens"] = total_tokens
+        if raw_items:
+            merged["steps"] = raw_items
+        return merged
+
+    def _topics_text(self, evaluations: list[TopicEvaluation], *, limit: int = 3) -> str:
+        relevant_topics = [item for item in evaluations if item.classification != "irrelevant"]
+        return "\n".join(
+            f"- {item.topic_name} / score={item.score} / keywords={', '.join(item.matched_keywords[:6])}"
+            for item in relevant_topics[:limit]
+        )
+
+    def _build_paper_prompt(self, paper: PaperRecord, evaluations: list[TopicEvaluation]) -> str:
+        topics_text = self._topics_text(evaluations)
         fulltext = paper.fulltext_excerpt or ""
         if len(fulltext) > self.config.max_input_chars:
             fulltext = fulltext[: self.config.max_input_chars]
@@ -412,6 +671,64 @@ class LLMClient:
             f"摘要:\n{context['abstract']}\n\n"
             f"全文节选:\n{context['fulltext']}\n"
         )
+
+    def _build_paper_chunk_prompt(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        chunk_text: str,
+        *,
+        chunk_index: int,
+        chunk_total: int,
+    ) -> str:
+        topics_text = self._topics_text(evaluations)
+        context = {
+            "title": paper.title,
+            "authors": ", ".join(paper.authors[:8]) or "未知",
+            "venue": paper.venue or "未知",
+            "published_at": paper.published_at or "未知",
+            "topics_text": topics_text or "- 无",
+            "abstract": shorten(paper.abstract or "", 3000) or "无",
+            "chunk_index": str(chunk_index),
+            "chunk_total": str(chunk_total),
+            "chunk_text": chunk_text,
+        }
+        if self.prompt_library:
+            return self.prompt_library.paper_chunk_user(context)
+        return (
+            f"论文《{paper.title}》正文分块 {chunk_index}/{chunk_total}\n"
+            f"相关主题:\n{topics_text or '- 无'}\n\n"
+            f"摘要:\n{context['abstract']}\n\n"
+            f"正文分块:\n{chunk_text}\n"
+        )
+
+    def _build_paper_reduce_prompt(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        chunk_notes: list[str],
+    ) -> str:
+        topics_text = self._topics_text(evaluations)
+        context = {
+            "title": paper.title,
+            "authors": ", ".join(paper.authors[:8]) or "未知",
+            "venue": paper.venue or "未知",
+            "published_at": paper.published_at or "未知",
+            "topics_text": topics_text or "- 无",
+            "abstract": shorten(paper.abstract or "", 4000) or "无",
+            "chunk_notes": self._render_chunk_notes(chunk_notes),
+        }
+        if self.prompt_library:
+            return self.prompt_library.paper_reduce_user(context)
+        return (
+            f"标题: {context['title']}\n"
+            f"相关主题:\n{context['topics_text']}\n\n"
+            f"摘要:\n{context['abstract']}\n\n"
+            f"分块分析结果:\n{context['chunk_notes']}\n"
+        )
+
+    def _render_chunk_notes(self, chunk_notes: list[str]) -> str:
+        return "\n\n".join(note.strip() for note in chunk_notes if note.strip())
 
     def _build_topic_digest_prompt(self, topic_name: str, description: str, entries: list[ReportEntry]) -> str:
         paper_blocks: list[str] = []
@@ -464,11 +781,7 @@ class LLMClient:
         )
 
     def _build_compact_paper_prompt(self, paper: PaperRecord, evaluations: list[TopicEvaluation]) -> str:
-        relevant_topics = [item for item in evaluations if item.classification != "irrelevant"]
-        topics_text = "\n".join(
-            f"- {item.topic_name} / score={item.score} / keywords={', '.join(item.matched_keywords[:5])}"
-            for item in relevant_topics[:3]
-        )
+        topics_text = self._topics_text(evaluations)
         abstract = shorten(paper.abstract or "", min(self.config.max_input_chars, 1200)) or "无"
         compact_fulltext = shorten(paper.fulltext_excerpt or "", 800) or "无"
         return (
@@ -488,7 +801,17 @@ class LLMClient:
     def _paper_summary_system_prompt(self) -> str:
         if self.prompt_library:
             return self.prompt_library.paper_summary_system()
-        return "你是一个严谨的中文论文分析助手。请根据提供的标题、摘要、全文节选和相关性标签，输出简洁、具体、避免空话的 JSON。"
+        return "你是一个严谨的中文论文分析助手。请根据提供的标题、摘要、全文信息和相关性标签，输出简洁、具体、避免空话的 JSON。"
+
+    def _paper_chunk_system_prompt(self) -> str:
+        if self.prompt_library:
+            return self.prompt_library.paper_chunk_system()
+        return "你是一个严谨的中文论文分析助手。请只基于当前正文分块提取事实，不要脑补。"
+
+    def _paper_reduce_system_prompt(self) -> str:
+        if self.prompt_library:
+            return self.prompt_library.paper_reduce_system()
+        return "你是一个严谨的中文论文分析助手。请基于整篇论文的分块分析结果生成高质量最终总结。"
 
     def _topic_digest_system_prompt(self) -> str:
         if self.prompt_library:
@@ -506,6 +829,12 @@ class LLMClient:
         method = str(parsed.get("method", "")).strip()
         if method:
             parts.append(f"方法：{method}")
+        application = str(parsed.get("application", "")).strip()
+        if application:
+            parts.append(f"应用：{application}")
+        results = str(parsed.get("results", "")).strip()
+        if results:
+            parts.append(f"结果：{results}")
         contributions = [str(item).strip() for item in parsed.get("contributions", []) if str(item).strip()]
         if contributions:
             parts.append(f"贡献：{'；'.join(contributions[:3])}")
@@ -529,12 +858,39 @@ class LLMClient:
                 "summary": {"type": "string"},
                 "problem": {"type": "string"},
                 "method": {"type": "string"},
+                "application": {"type": "string"},
+                "results": {"type": "string"},
                 "contributions": {"type": "array", "items": {"type": "string"}},
                 "limitations": {"type": "array", "items": {"type": "string"}},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "basis": {"type": "string", "enum": ["llm+fulltext+metadata", "llm+abstract+metadata"]},
             },
-            "required": ["summary", "problem", "method", "contributions", "limitations", "tags", "basis"],
+            "required": [
+                "summary",
+                "problem",
+                "method",
+                "application",
+                "results",
+                "contributions",
+                "limitations",
+                "tags",
+                "basis",
+            ],
+        }
+
+    def _paper_chunk_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "chunk_summary": {"type": "string"},
+                "key_points": {"type": "array", "items": {"type": "string"}},
+                "methods": {"type": "array", "items": {"type": "string"}},
+                "evidence": {"type": "array", "items": {"type": "string"}},
+                "applications": {"type": "array", "items": {"type": "string"}},
+                "limitations": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["chunk_summary", "key_points", "methods", "evidence", "applications", "limitations"],
         }
 
     def _topic_digest_schema(self) -> dict[str, Any]:

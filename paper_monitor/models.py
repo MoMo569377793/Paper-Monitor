@@ -76,6 +76,9 @@ class LLMConfig:
     store: bool = False
     enable_topic_digest: bool = False
     topic_digest_entry_limit: int = 8
+    fulltext_chunk_chars: int = 10000
+    fulltext_chunk_overlap_chars: int = 1200
+    fulltext_max_chunks: int = 12
 
 
 @dataclass(slots=True)
@@ -89,6 +92,10 @@ class BootstrapConfig:
 class PromptPaths:
     paper_summary_system: Path = Path("prompts/paper_summary_system.txt")
     paper_summary_user: Path = Path("prompts/paper_summary_user.txt")
+    paper_chunk_system: Path = Path("prompts/paper_chunk_system.txt")
+    paper_chunk_user: Path = Path("prompts/paper_chunk_user.txt")
+    paper_reduce_system: Path = Path("prompts/paper_reduce_system.txt")
+    paper_reduce_user: Path = Path("prompts/paper_reduce_user.txt")
     topic_digest_system: Path = Path("prompts/topic_digest_system.txt")
     topic_digest_user: Path = Path("prompts/topic_digest_user.txt")
 

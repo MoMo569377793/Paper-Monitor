@@ -56,6 +56,10 @@
   "prompts": {
     "paper_summary_system": "prompts/paper_summary_system.txt",
     "paper_summary_user": "prompts/paper_summary_user.txt",
+    "paper_chunk_system": "prompts/paper_chunk_system.txt",
+    "paper_chunk_user": "prompts/paper_chunk_user.txt",
+    "paper_reduce_system": "prompts/paper_reduce_system.txt",
+    "paper_reduce_user": "prompts/paper_reduce_user.txt",
     "topic_digest_system": "prompts/topic_digest_system.txt",
     "topic_digest_user": "prompts/topic_digest_user.txt"
   },
@@ -73,7 +77,10 @@
     "max_output_tokens": 700,
     "store": false,
     "enable_topic_digest": true,
-    "topic_digest_entry_limit": 8
+    "topic_digest_entry_limit": 8,
+    "fulltext_chunk_chars": 10000,
+    "fulltext_chunk_overlap_chars": 1200,
+    "fulltext_max_chunks": 12
   },
   "llm_variants": [],
   "topics": [

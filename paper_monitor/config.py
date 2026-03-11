@@ -72,6 +72,10 @@ DEFAULT_CONFIG = {
     "prompts": {
         "paper_summary_system": "prompts/paper_summary_system.txt",
         "paper_summary_user": "prompts/paper_summary_user.txt",
+        "paper_chunk_system": "prompts/paper_chunk_system.txt",
+        "paper_chunk_user": "prompts/paper_chunk_user.txt",
+        "paper_reduce_system": "prompts/paper_reduce_system.txt",
+        "paper_reduce_user": "prompts/paper_reduce_user.txt",
         "topic_digest_system": "prompts/topic_digest_system.txt",
         "topic_digest_user": "prompts/topic_digest_user.txt",
     },
@@ -90,6 +94,9 @@ DEFAULT_CONFIG = {
         "store": False,
         "enable_topic_digest": False,
         "topic_digest_entry_limit": 8,
+        "fulltext_chunk_chars": 10000,
+        "fulltext_chunk_overlap_chars": 1200,
+        "fulltext_max_chunks": 12,
     },
     "llm_variants": [],
     "topics": [
@@ -242,6 +249,9 @@ def _build_llm_config(raw: dict, *, config_stem: str, index: int, primary: bool)
         store=bool(raw.get("store", False)),
         enable_topic_digest=bool(raw.get("enable_topic_digest", False)),
         topic_digest_entry_limit=int(raw.get("topic_digest_entry_limit", 8)),
+        fulltext_chunk_chars=int(raw.get("fulltext_chunk_chars", 10000)),
+        fulltext_chunk_overlap_chars=int(raw.get("fulltext_chunk_overlap_chars", 1200)),
+        fulltext_max_chunks=int(raw.get("fulltext_max_chunks", 12)),
     )
 
 
@@ -278,6 +288,10 @@ def load_settings(config_path: str | Path) -> Settings:
     prompt_paths = PromptPaths(
         paper_summary_system=(base_dir / prompts_raw.get("paper_summary_system", "prompts/paper_summary_system.txt")).resolve(),
         paper_summary_user=(base_dir / prompts_raw.get("paper_summary_user", "prompts/paper_summary_user.txt")).resolve(),
+        paper_chunk_system=(base_dir / prompts_raw.get("paper_chunk_system", "prompts/paper_chunk_system.txt")).resolve(),
+        paper_chunk_user=(base_dir / prompts_raw.get("paper_chunk_user", "prompts/paper_chunk_user.txt")).resolve(),
+        paper_reduce_system=(base_dir / prompts_raw.get("paper_reduce_system", "prompts/paper_reduce_system.txt")).resolve(),
+        paper_reduce_user=(base_dir / prompts_raw.get("paper_reduce_user", "prompts/paper_reduce_user.txt")).resolve(),
         topic_digest_system=(base_dir / prompts_raw.get("topic_digest_system", "prompts/topic_digest_system.txt")).resolve(),
         topic_digest_user=(base_dir / prompts_raw.get("topic_digest_user", "prompts/topic_digest_user.txt")).resolve(),
     )

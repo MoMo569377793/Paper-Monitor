@@ -1,0 +1,25 @@
+你正在阅读论文《{title}》的正文分块 {chunk_index}/{chunk_total}。
+请只基于当前分块内容，写一份供后续聚合使用的中文备忘录。
+
+输出格式要求：
+1. 只输出正文，不要输出 JSON，不要输出 Markdown 代码块
+2. 使用以下固定小标题：
+分块概括：
+关键方法：
+结果/证据：
+应用场景：
+局限：
+3. 每个小标题下写 1-4 条短句，保留具体方法、实验、结论和适用场景
+4. 不要脑补整篇论文没有写出的信息
+
+标题: {title}
+作者: {authors}
+发表信息: venue={venue}, published_at={published_at}
+相关主题:
+{topics_text}
+
+摘要:
+{abstract}
+
+当前正文分块:
+{chunk_text}

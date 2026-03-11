@@ -32,6 +32,8 @@ def run_daemon(
     loops = 0
     runtime_variants = llm_variants or []
     enrichment_pipeline = EnrichmentPipeline(settings, db, llm_variants=runtime_variants)
+    if enrich and skip_document_processing and use_llm:
+        LOGGER.warning("daemon 使用了 --skip-pdf + --with-llm，LLM 将无法读取完整 PDF 文本，只会基于标题/摘要生成总结。")
     while True:
         loops += 1
         LOGGER.info("starting fetch cycle %s", loops)

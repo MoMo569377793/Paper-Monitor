@@ -6,8 +6,9 @@ from pathlib import Path
 
 from paper_monitor.config import load_settings
 from paper_monitor.enrichment import DocumentArtifacts, EnrichmentPipeline
+from paper_monitor.llm import LLMClient
 from paper_monitor.models import FetchPlan, LLMResult
-from paper_monitor.models import PaperCandidate, RunStats
+from paper_monitor.models import PaperCandidate, PaperRecord, RunStats
 from paper_monitor.pipeline import MonitorPipeline
 from paper_monitor.reports import generate_comparison_report, generate_report
 from paper_monitor.storage import Database
@@ -435,6 +436,137 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertEqual(stats.llm_summaries, 1)
             self.assertEqual(fake_llm.titles, ["Newer FlashAttention Paper"])
             db.close()
+
+    def test_llm_summary_reads_fulltext_txt_and_uses_map_reduce(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            settings.llm.enabled = True
+            settings.llm.provider = "openai_compatible"
+            settings.llm.base_url = "https://example.invalid/v1"
+            settings.llm.model = "dummy-model"
+            settings.llm.api_key_env = ""
+            settings.llm.max_input_chars = 180
+            settings.llm.fulltext_chunk_chars = 140
+            settings.llm.fulltext_chunk_overlap_chars = 20
+            settings.llm.fulltext_max_chunks = 6
+
+            fulltext_path = root / "paper.txt"
+            fulltext_path.write_text(
+                (
+                    (
+                        "Introduction. This paper studies matrix-free finite element operators and partial assembly. "
+                        "It introduces a new fused operator application path and a cache-aware execution layout. "
+                    )
+                    * 12
+                    + "\n\n"
+                    + (
+                        "Method. The solver combines matrix-free multigrid preconditioning with GPU-oriented tensor contractions. "
+                        "Implementation details cover memory layout, element restriction, and kernel scheduling. "
+                    )
+                    * 12
+                    + "\n\n"
+                    + (
+                        "Experiments. LATE_SECTION_MARKER. Experiments show strong scaling on GPUs, lower memory traffic, "
+                        "and better throughput on high-order cardiac electrophysiology workloads. The paper also discusses ablation studies and solver robustness. "
+                    )
+                    * 12
+                ),
+                encoding="utf-8",
+            )
+
+            paper = PaperRecord(
+                id=1,
+                title="Matrix-Free FEM Full Paper",
+                title_norm="matrix free fem full paper",
+                abstract="A short abstract that should not be the only LLM input.",
+                authors=["Alice", "Bob"],
+                published_at="2026-03-10T09:00:00+08:00",
+                updated_at="2026-03-10T09:00:00+08:00",
+                primary_url="https://example.invalid/paper",
+                pdf_url="https://example.invalid/paper.pdf",
+                doi="",
+                arxiv_id="",
+                venue="arXiv",
+                year=2026,
+                categories=["cs.NA"],
+                summary_text="",
+                summary_basis="metadata-only",
+                tags=[],
+                pdf_local_path="",
+                pdf_status="downloaded",
+                pdf_downloaded_at="2026-03-10T10:00:00+08:00",
+                fulltext_txt_path=str(fulltext_path),
+                fulltext_excerpt="short excerpt without late section marker",
+                fulltext_status="extracted",
+                page_count=12,
+                llm_summary={},
+                analysis_updated_at=None,
+                source_first="arxiv",
+                created_at="2026-03-10T09:00:00+08:00",
+                last_seen_at="2026-03-10T09:00:00+08:00",
+                metadata={},
+            )
+            evaluations = [
+                type(
+                    "Eval",
+                    (),
+                    {
+                        "classification": "relevant",
+                        "topic_name": "有限元分析 Matrix-Free 算法优化",
+                        "score": 30.0,
+                        "matched_keywords": ["matrix-free", "finite element", "multigrid"],
+                    },
+                )()
+            ]
+
+            class InspectLLMClient(LLMClient):
+                def __init__(self, config):  # noqa: ANN001
+                    super().__init__(config)
+                    self.enabled = True
+                    self.calls: list[tuple[str, str]] = []
+
+                def _request_text(self, **kwargs):  # noqa: ANN003
+                    self.calls.append(("paper_chunk_note", kwargs["user_prompt"]))
+                    return (
+                        "分块概括：这一部分讨论 matrix-free 与 partial assembly。\n"
+                        "关键方法：multigrid preconditioning。\n"
+                        "结果/证据：GPU throughput improves。\n"
+                        "应用场景：cardiac electrophysiology。\n"
+                        "局限：requires high-order discretization。",
+                        {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    )
+
+                def _request_structured_json(self, **kwargs):  # noqa: ANN003
+                    self.calls.append((kwargs["schema_name"], kwargs["user_prompt"]))
+                    return (
+                        {
+                            "summary": "论文针对矩阵自由高阶有限元算子求解的性能瓶颈，提出了融合算子应用与 multigrid 预条件的 GPU 实现，并在心脏电生理高阶工作负载上展示了更高吞吐与更低内存流量。",
+                            "problem": "高阶 matrix-free FEM 的算子应用和求解开销较高。",
+                            "method": "结合 fused operator application、partial assembly 和 multigrid 预条件。",
+                            "application": "高阶有限元、GPU 求解、心脏电生理仿真。",
+                            "results": "实验显示 GPU 吞吐提升、内存流量下降，并具有较好的强扩展性。",
+                            "contributions": ["提出融合算子应用路径", "给出 multigrid GPU 实现"],
+                            "limitations": ["依赖高阶离散场景"],
+                            "tags": ["matrix-free", "multigrid", "gpu"],
+                            "basis": "llm+fulltext+metadata",
+                        },
+                        {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28},
+                    )
+
+            client = InspectLLMClient(settings.llm)
+            result = client.generate_summary(paper, evaluations)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.summary_basis, "llm+fulltext+metadata")
+            self.assertGreaterEqual(len([item for item in client.calls if item[0] == "paper_chunk_note"]), 2)
+            self.assertTrue(any("LATE_SECTION_MARKER" in prompt for _, prompt in client.calls))
+            self.assertIn("应用：高阶有限元", result.summary_text)
+            self.assertGreaterEqual(int(result.structured.get("chunk_count", 0)), 2)
 
     def test_enrichment_candidates_prioritize_missing_llm_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

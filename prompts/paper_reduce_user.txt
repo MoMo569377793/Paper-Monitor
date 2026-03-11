@@ -1,0 +1,28 @@
+请基于整篇论文的分块分析结果，生成最终中文总结。
+
+目标：
+1. 明确这篇论文解决了什么问题
+2. 明确提出了什么核心方法
+3. 明确适用于什么任务、场景或领域
+4. 明确论文给出的关键结果、证据或实验结论
+5. 明确主要贡献和局限
+
+输出要求：
+- summary：150-260 字，必须体现“问题、方法、应用、结果”
+- problem/method/application/results：各 1-2 句
+- contributions：2-4 条
+- limitations：2-4 条
+- tags：3-8 个中文或英文关键词
+- basis：如果分块来自完整 PDF，请输出 llm+fulltext+metadata
+
+标题: {title}
+作者: {authors}
+发表信息: venue={venue}, published_at={published_at}
+相关主题:
+{topics_text}
+
+摘要:
+{abstract}
+
+整篇论文的分块分析结果:
+{chunk_notes}

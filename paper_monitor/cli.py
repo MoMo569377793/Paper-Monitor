@@ -192,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "enrich":
+            if args.skip_pdf and args.with_llm:
+                LOGGER.warning("当前使用了 --skip-pdf，LLM 将无法读取完整 PDF 文本，只会基于标题/摘要生成总结。")
             enrich_started_at = now_iso(settings.timezone) if args.since_last_run else None
             stats = enrichment_pipeline.run(
                 limit=args.limit,
@@ -243,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             enrichment_stats = None
             if args.enrich:
+                if args.skip_pdf and args.with_llm:
+                    LOGGER.warning("当前使用了 --skip-pdf，LLM 将无法读取完整 PDF 文本，只会基于标题/摘要生成总结。")
                 enrich_started_at = now_iso(settings.timezone) if args.since_last_run else None
                 enrichment_stats = enrichment_pipeline.run(
                     limit=args.enrich_limit,

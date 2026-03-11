@@ -115,6 +115,10 @@ class MonitorPipelineTest(unittest.TestCase):
             (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
 
             settings = load_settings(root / "config" / "config.json")
+            settings.llm.variant_id = "config-example-gpt-5-4"
+            settings.llm.label = "gpt-5.4"
+            settings.llm.model = "gpt-5.4"
+            settings.llm.base_url = "https://example.invalid/v1"
             db = Database(settings.database_path, settings.timezone)
             db.initialize()
             pipeline = MonitorPipeline(settings, db)
@@ -179,6 +183,10 @@ class MonitorPipelineTest(unittest.TestCase):
             (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
 
             settings = load_settings(root / "config" / "config.json")
+            settings.llm.variant_id = "config-example-gpt-5-4"
+            settings.llm.label = "gpt-5.4"
+            settings.llm.model = "gpt-5.4"
+            settings.llm.base_url = "https://example.invalid/v1"
             db = Database(settings.database_path, settings.timezone)
             db.initialize()
             pipeline = MonitorPipeline(settings, db)
@@ -229,7 +237,17 @@ class MonitorPipelineTest(unittest.TestCase):
             pipeline._process_candidate(matrix_candidate, RunStats())
             pipeline._process_candidate(ai_candidate, RunStats())
 
-            paths = generate_report(db, settings, report_date="2026-03-10", report_type="daily", lookback_days=1)
+            class FakeRenderClient:
+                enabled = False
+
+            paths = generate_report(
+                db,
+                settings,
+                report_date="2026-03-10",
+                report_type="daily",
+                lookback_days=1,
+                llm_client=FakeRenderClient(),
+            )
             markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
             html = Path(paths["html"]).read_text(encoding="utf-8")
 
@@ -340,7 +358,17 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertIn("partial assembly", paper.summary_text)
             self.assertEqual(paper.page_count, 12)
 
-            paths = generate_report(db, settings, report_date="2026-03-10", report_type="daily", lookback_days=1)
+            class FakeRenderClient:
+                enabled = False
+
+            paths = generate_report(
+                db,
+                settings,
+                report_date="2026-03-10",
+                report_type="daily",
+                lookback_days=1,
+                llm_client=FakeRenderClient(),
+            )
             markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
             self.assertIn("全文状态", markdown)
             self.assertIn("llm+fulltext+metadata", markdown)
@@ -355,6 +383,10 @@ class MonitorPipelineTest(unittest.TestCase):
             (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
 
             settings = load_settings(root / "config" / "config.json")
+            settings.llm.variant_id = "config-example-gpt-5-4"
+            settings.llm.label = "gpt-5.4"
+            settings.llm.model = "gpt-5.4"
+            settings.llm.base_url = "https://example.invalid/v1"
             db = Database(settings.database_path, settings.timezone)
             db.initialize()
             pipeline = MonitorPipeline(settings, db)
@@ -576,6 +608,10 @@ class MonitorPipelineTest(unittest.TestCase):
             (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
 
             settings = load_settings(root / "config" / "config.json")
+            settings.llm.variant_id = "config-example-gpt-5-4"
+            settings.llm.label = "gpt-5.4"
+            settings.llm.model = "gpt-5.4"
+            settings.llm.base_url = "https://example.invalid/v1"
             db = Database(settings.database_path, settings.timezone)
             db.initialize()
             pipeline = MonitorPipeline(settings, db)
@@ -636,6 +672,56 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertEqual(ordered[0].id, 1)
             self.assertEqual(ordered[1].id, 2)
 
+            db.close()
+
+    def test_fetch_paper_llm_summaries_batches_large_id_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+
+            for paper_id in range(1, 251):
+                db.connection.execute(
+                    """
+                    INSERT INTO papers (
+                        id, title, title_norm, abstract, authors_json, published_at, updated_at,
+                        primary_url, pdf_url, doi, arxiv_id, venue, year, categories_json,
+                        summary_text, summary_basis, tags_json, metadata_json, source_first,
+                        created_at, last_seen_at
+                    ) VALUES (?, ?, ?, '', '[]', ?, ?, '', '', '', '', 'arXiv', 2026, '[]', '', 'metadata-only', '[]', '{}', 'arxiv', ?, ?)
+                    """,
+                    (
+                        paper_id,
+                        f"Paper {paper_id}",
+                        f"paper {paper_id}",
+                        "2026-03-10T09:00:00+08:00",
+                        "2026-03-10T09:00:00+08:00",
+                        "2026-03-10T09:00:00+08:00",
+                        "2026-03-10T09:00:00+08:00",
+                    ),
+                )
+                db.upsert_paper_llm_summary(
+                    paper_id,
+                    variant_id="config-example-gpt-5-4",
+                    variant_label="gpt-5.4",
+                    provider="openai_responses",
+                    base_url="https://example.invalid/v1",
+                    model="gpt-5.4",
+                    summary_text=f"Summary {paper_id}",
+                    summary_basis="llm+abstract+metadata",
+                    tags=["tag"],
+                    structured={"summary": f"Summary {paper_id}"},
+                    usage={},
+                )
+
+            summaries = db.fetch_paper_llm_summaries(list(range(1, 251)))
+            self.assertEqual(len(summaries), 250)
+            self.assertEqual(summaries[250][0].summary_text, "Summary 250")
             db.close()
 
     def test_report_includes_topic_digest_when_llm_client_is_provided(self) -> None:
@@ -704,6 +790,94 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertIn("gpt-5.4 主题概览", markdown)
             self.assertIn("attention kernel 与 kernel fusion", markdown)
             self.assertIn("gpt-5.4 Token", markdown)
+
+            db.close()
+
+    def test_report_renders_fulltext_scope_and_structured_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            settings.llm.variant_id = "config-example-gpt-5-4"
+            settings.llm.label = "gpt-5.4"
+            settings.llm.model = "gpt-5.4"
+            settings.llm.base_url = "https://example.invalid/v1"
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            pipeline._process_candidate(
+                PaperCandidate(
+                    source_name="arxiv",
+                    source_paper_id="2751.00001",
+                    query_text="matrix-free finite element",
+                    title="Matrix-Free Fulltext Reporting Test",
+                    abstract="We study matrix-free operators and preconditioners for high-order FEM.",
+                    authors=["Alice"],
+                    published_at="2026-03-10T09:00:00+08:00",
+                    updated_at="2026-03-10T09:00:00+08:00",
+                    primary_url="https://arxiv.org/abs/2751.00001",
+                    pdf_url="https://arxiv.org/pdf/2751.00001.pdf",
+                    doi="",
+                    arxiv_id="2751.00001",
+                    venue="arXiv",
+                    year=2026,
+                    categories=["cs.NA"],
+                    raw={"fixture": True},
+                ),
+                RunStats(),
+            )
+            db.upsert_paper_llm_summary(
+                1,
+                variant_id="config-example-gpt-5-4",
+                variant_label="gpt-5.4",
+                provider="openai_responses",
+                base_url="https://example.invalid/v1",
+                model="gpt-5.4",
+                summary_text="这是一个基于完整全文生成的结构化总结。",
+                summary_basis="llm+fulltext+metadata",
+                tags=["matrix-free", "multigrid"],
+                structured={
+                    "summary": "这是一个基于完整全文生成的结构化总结。",
+                    "problem": "高阶 FEM 的矩阵自由算子与预条件效率问题。",
+                    "method": "matrix-free + multigrid + partial assembly。",
+                    "application": "高阶有限元与 GPU 求解。",
+                    "results": "性能和扩展性优于基线。",
+                    "contributions": ["提出新型预条件器", "给出 GPU 实现"],
+                    "limitations": ["依赖高阶离散"],
+                    "tags": ["matrix-free", "multigrid"],
+                    "basis": "llm+fulltext+metadata",
+                    "source_mode": "fulltext_txt",
+                    "chunk_count": 4,
+                },
+                usage={"input_tokens": 1234, "output_tokens": 222, "total_tokens": 1456},
+            )
+
+            class FakeRenderClient:
+                enabled = False
+
+            paths = generate_report(
+                db,
+                settings,
+                report_date="2026-03-10",
+                report_type="daily",
+                lookback_days=1,
+                llm_client=FakeRenderClient(),
+            )
+            markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
+            html = Path(paths["html"]).read_text(encoding="utf-8")
+            export = Path(paths["json"]).read_text(encoding="utf-8")
+
+            self.assertIn("输入依据：`已读取完整全文`", markdown)
+            self.assertIn("本次总结读取了完整 PDF 提取全文，并按 4 个分块进行分析后聚合。", markdown)
+            self.assertIn("问题：高阶 FEM 的矩阵自由算子与预条件效率问题。", markdown)
+            self.assertIn("方法：matrix-free + multigrid + partial assembly。", markdown)
+            self.assertIn("输入依据 已读取完整全文", html)
+            self.assertIn("\"summary_scope\": \"已读取完整全文\"", export)
+            self.assertIn("\"chunk_count\": 4", export)
 
             db.close()
 

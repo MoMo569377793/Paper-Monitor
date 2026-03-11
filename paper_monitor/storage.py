@@ -504,19 +504,22 @@ class Database:
         self.connection.commit()
 
     def fetch_paper_llm_summaries(self, paper_ids: list[int] | None = None) -> dict[int, list[PaperLLMSummary]]:
-        params: list[Any] = []
-        sql = """
+        rows: list[sqlite3.Row] = []
+        base_sql = """
             SELECT paper_id, variant_id, variant_label, provider, base_url, model,
                    summary_text, summary_basis, tags_json, structured_json, usage_json,
                    created_at, updated_at
             FROM paper_llm_summaries
         """
         if paper_ids:
-            placeholders = ", ".join(["?"] * len(paper_ids))
-            sql += f" WHERE paper_id IN ({placeholders})"
-            params.extend(paper_ids)
-        sql += " ORDER BY variant_label ASC, model ASC, id ASC"
-        rows = self.connection.execute(sql, params).fetchall()
+            batch_size = 200
+            for start in range(0, len(paper_ids), batch_size):
+                batch = paper_ids[start : start + batch_size]
+                placeholders = ", ".join(["?"] * len(batch))
+                sql = base_sql + f" WHERE paper_id IN ({placeholders}) ORDER BY variant_label ASC, model ASC, id ASC"
+                rows.extend(self.connection.execute(sql, batch).fetchall())
+        else:
+            rows = self.connection.execute(base_sql + " ORDER BY variant_label ASC, model ASC, id ASC").fetchall()
         grouped: dict[int, list[PaperLLMSummary]] = {}
         for row in rows:
             grouped.setdefault(int(row["paper_id"]), []).append(

@@ -110,16 +110,23 @@ def _render_summary_lines(variants: list[LLMRuntimeVariant], summaries: list[Pap
     for variant in variants:
         summary = summary_map.get(variant.variant_id)
         if not summary:
-            lines.append(f"- {variant.label}：未生成")
+            lines.append(f"- 模型：`{variant.label}`")
+            lines.append("- 输入依据：`未生成`")
+            lines.append("- 总结：未生成")
             continue
         usage = summary.usage if isinstance(summary.usage, dict) else {}
-        token_text = ""
+        structured = summary.structured if isinstance(summary.structured, dict) else {}
+        lines.append(f"- 模型：`{variant.label}`")
+        lines.append(f"- 输入依据：`{_summary_scope_label(summary)}`")
+        if _summary_scope_note(summary):
+            lines.append(f"- 依据说明：{_summary_scope_note(summary)}")
         if usage:
-            token_text = (
-                f" (Token in {usage.get('input_tokens', '未知')} / "
-                f"out {usage.get('output_tokens', '未知')})"
+            lines.append(
+                f"- Token：in `{usage.get('input_tokens', '未知')}` / "
+                f"out `{usage.get('output_tokens', '未知')}` / total `{usage.get('total_tokens', '未知')}`"
             )
-        lines.append(f"- {variant.label}：{summary.summary_text}{token_text}")
+        lines.append(f"- 总结：{summary.summary_text}")
+        lines.extend(_structured_summary_markdown(structured))
     return lines
 
 
@@ -129,20 +136,109 @@ def _render_summary_html(variants: list[LLMRuntimeVariant], summaries: list[Pape
     for variant in variants:
         summary = summary_map.get(variant.variant_id)
         if summary is None:
-            items.append(f"<li><strong>{html.escape(variant.label)}：</strong>未生成</li>")
+            items.append(
+                f"""
+                <article class="llm-summary-card">
+                  <h4>{html.escape(variant.label)}</h4>
+                  <p class="meta">输入依据 未生成</p>
+                  <p><strong>总结：</strong>未生成</p>
+                </article>
+                """
+            )
             continue
         usage = summary.usage if isinstance(summary.usage, dict) else {}
-        token_text = ""
+        structured = summary.structured if isinstance(summary.structured, dict) else {}
+        usage_html = ""
         if usage:
-            token_text = (
-                f"Token in {usage.get('input_tokens', '未知')} / "
-                f"out {usage.get('output_tokens', '未知')}"
+            usage_html = (
+                f"<p class=\"meta\">Token in {html.escape(str(usage.get('input_tokens', '未知')))} / "
+                f"out {html.escape(str(usage.get('output_tokens', '未知')))} / "
+                f"total {html.escape(str(usage.get('total_tokens', '未知')))}</p>"
             )
+        scope_note = _summary_scope_note(summary)
         items.append(
-            f"<li><strong>{html.escape(variant.label)}：</strong>{html.escape(summary.summary_text)}"
-            f"{f' <span class=\"meta\">{html.escape(token_text)}</span>' if token_text else ''}</li>"
+            f"""
+            <article class="llm-summary-card">
+              <h4>{html.escape(variant.label)}</h4>
+              <p class="meta">输入依据 {html.escape(_summary_scope_label(summary))}</p>
+              {f'<p class="meta">{html.escape(scope_note)}</p>' if scope_note else ''}
+              {usage_html}
+              <p><strong>总结：</strong>{html.escape(summary.summary_text)}</p>
+              {_structured_summary_html(structured)}
+            </article>
+            """
         )
-    return '<ul class="llm-summary-list">' + "".join(items) + "</ul>"
+    return '<div class="llm-summary-grid">' + "".join(items) + "</div>"
+
+
+def _summary_scope_label(summary: PaperLLMSummary) -> str:
+    structured = summary.structured if isinstance(summary.structured, dict) else {}
+    source_mode = str(structured.get("source_mode", "")).strip().lower()
+    basis = (summary.summary_basis or "").strip().lower()
+    if source_mode == "fulltext_txt" or basis == "llm+fulltext+metadata":
+        return "已读取完整全文"
+    return "仅基于摘要/元数据"
+
+
+def _summary_scope_note(summary: PaperLLMSummary) -> str:
+    structured = summary.structured if isinstance(summary.structured, dict) else {}
+    source_mode = str(structured.get("source_mode", "")).strip().lower()
+    chunk_count = structured.get("chunk_count")
+    if source_mode == "fulltext_txt":
+        if chunk_count:
+            return f"本次总结读取了完整 PDF 提取全文，并按 {chunk_count} 个分块进行分析后聚合。"
+        return "本次总结读取了完整 PDF 提取全文后再进行聚合分析。"
+    if (summary.summary_basis or "").strip().lower() == "llm+fulltext+metadata":
+        return "本次总结包含全文信息。"
+    return "本次总结没有读取完整全文，只基于标题、摘要和元数据。"
+
+
+def _structured_summary_markdown(structured: dict) -> list[str]:
+    lines: list[str] = []
+    field_map = [
+        ("problem", "问题"),
+        ("method", "方法"),
+        ("application", "应用"),
+        ("results", "结果"),
+    ]
+    for field_name, label in field_map:
+        value = str(structured.get(field_name, "")).strip()
+        if value:
+            lines.append(f"- {label}：{value}")
+    contributions = [str(item).strip() for item in structured.get("contributions", []) if str(item).strip()]
+    if contributions:
+        lines.append(f"- 贡献：`{' | '.join(contributions[:4])}`")
+    limitations = [str(item).strip() for item in structured.get("limitations", []) if str(item).strip()]
+    if limitations:
+        lines.append(f"- 局限：`{' | '.join(limitations[:4])}`")
+    tags = [str(item).strip() for item in structured.get("tags", []) if str(item).strip()]
+    if tags:
+        lines.append(f"- 标签：`{', '.join(tags[:8])}`")
+    return lines
+
+
+def _structured_summary_html(structured: dict) -> str:
+    parts: list[str] = []
+    field_map = [
+        ("problem", "问题"),
+        ("method", "方法"),
+        ("application", "应用"),
+        ("results", "结果"),
+    ]
+    for field_name, label in field_map:
+        value = str(structured.get(field_name, "")).strip()
+        if value:
+            parts.append(f"<p><strong>{html.escape(label)}：</strong>{html.escape(value)}</p>")
+    contributions = [str(item).strip() for item in structured.get("contributions", []) if str(item).strip()]
+    if contributions:
+        parts.append(f"<p><strong>贡献：</strong>{html.escape(' | '.join(contributions[:4]))}</p>")
+    limitations = [str(item).strip() for item in structured.get("limitations", []) if str(item).strip()]
+    if limitations:
+        parts.append(f"<p><strong>局限：</strong>{html.escape(' | '.join(limitations[:4]))}</p>")
+    tags = [str(item).strip() for item in structured.get("tags", []) if str(item).strip()]
+    if tags:
+        parts.append(f"<p><strong>标签：</strong>{html.escape(', '.join(tags[:8]))}</p>")
+    return "".join(parts)
 
 
 def _serialize_variants(variants: list[LLMRuntimeVariant | dict]) -> list[dict[str, str]]:
@@ -239,6 +335,7 @@ def _render_markdown(
             lines.append(f"- 默认总结：{paper.summary_text}")
             lines.append("#### 多模型摘要")
             lines.extend(_render_summary_lines(variants, paper_summaries_by_paper.get(paper.id, [])))
+            lines.append("")
             if paper.fulltext_excerpt:
                 lines.append(f"- 全文节选：{shorten(paper.fulltext_excerpt, 320)}")
             elif paper.abstract:
@@ -286,10 +383,19 @@ def _render_html(
                   <p class="meta">相关性 {entry.classification} / 分数 {entry.score} / 来源 {html.escape(', '.join(entry.source_names) or paper.source_first)}</p>
                   <p class="meta">发布时间 {html.escape(paper.published_at or '未知')} / Venue {html.escape(paper.venue or '未知')}</p>
                   <p class="meta">全文状态 {html.escape(paper.fulltext_status)} / PDF {html.escape(paper.pdf_status)} / 页数 {html.escape(str(paper.page_count or '未知'))} / 总结来源 {html.escape(paper.summary_basis or '未知')}</p>
-                  <p><strong>匹配词：</strong>{html.escape(', '.join(entry.matched_keywords) or '无')}</p>
-                  <p><strong>默认总结：</strong>{html.escape(paper.summary_text)}</p>
-                  <div><strong>多模型摘要：</strong>{_render_summary_html(variants, paper_summaries_by_paper.get(paper.id, []))}</div>
-                  <p><strong>{'全文节选' if paper.fulltext_excerpt else '摘要片段'}：</strong>{html.escape(shorten(paper.fulltext_excerpt or paper.abstract or '无摘要', 360))}</p>
+                  <div class="paper-grid">
+                    <div class="paper-panel">
+                      <p><strong>匹配词：</strong>{html.escape(', '.join(entry.matched_keywords) or '无')}</p>
+                      <p><strong>默认总结：</strong>{html.escape(paper.summary_text)}</p>
+                    </div>
+                    <div class="paper-panel">
+                      <p><strong>{'全文节选' if paper.fulltext_excerpt else '摘要片段'}：</strong>{html.escape(shorten(paper.fulltext_excerpt or paper.abstract or '无摘要', 360))}</p>
+                    </div>
+                  </div>
+                  <div class="llm-summary-section">
+                    <p><strong>多模型摘要：</strong></p>
+                    {_render_summary_html(variants, paper_summaries_by_paper.get(paper.id, []))}
+                  </div>
                   <p><a href="{html.escape(paper.primary_url or (entry.source_urls[0] if entry.source_urls else '#'))}">打开原始链接</a></p>
                 </article>
                 """
@@ -387,9 +493,32 @@ def _render_html(
       background: var(--panel);
       box-shadow: 0 12px 30px rgba(24, 34, 45, 0.06);
     }}
-    .llm-summary-list {{
-      margin: 8px 0 0;
-      padding-left: 18px;
+    .paper-grid {{
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      margin: 12px 0;
+    }}
+    .paper-panel {{
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(243, 239, 231, 0.45);
+    }}
+    .llm-summary-section {{
+      margin-top: 12px;
+    }}
+    .llm-summary-grid {{
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      margin-top: 8px;
+    }}
+    .llm-summary-card {{
+      padding: 14px 16px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(255, 253, 248, 0.94);
     }}
     a {{
       color: var(--accent);
@@ -697,6 +826,19 @@ def generate_report(
                                     "model": summary.model,
                                     "summary_text": summary.summary_text,
                                     "summary_basis": summary.summary_basis,
+                                    "summary_scope": _summary_scope_label(summary),
+                                    "summary_scope_note": _summary_scope_note(summary),
+                                    "source_mode": (
+                                        summary.structured.get("source_mode", "")
+                                        if isinstance(summary.structured, dict)
+                                        else ""
+                                    ),
+                                    "chunk_count": (
+                                        summary.structured.get("chunk_count")
+                                        if isinstance(summary.structured, dict)
+                                        else None
+                                    ),
+                                    "structured": summary.structured,
                                     "usage": summary.usage,
                                 }
                                 for summary in paper_summaries_by_paper.get(entry.paper.id, [])

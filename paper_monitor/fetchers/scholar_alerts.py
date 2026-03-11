@@ -11,9 +11,10 @@ from email.header import decode_header
 from email.message import Message
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from paper_monitor.models import PaperCandidate, ScholarAlertsConfig, TopicConfig
+from paper_monitor.models import FetchPlan, PaperCandidate, ScholarAlertsConfig, TopicConfig
 from paper_monitor.utils import normalize_whitespace
 
 
@@ -36,9 +37,17 @@ class ScholarAlertsFetcher:
         self.timezone_name = timezone_name
         self.enabled = bool(config.enabled and config.imap_host and config.username)
 
-    def fetch(self, topic: TopicConfig, queries: list[str]) -> list[PaperCandidate]:
+    def fetch(
+        self,
+        topic: TopicConfig,
+        queries: list[str],
+        plan: FetchPlan | None = None,
+        progress: Callable[[str, bool], None] | None = None,
+    ) -> list[PaperCandidate]:
         if not self.enabled:
             return []
+        if progress:
+            progress(f"Scholar Alerts {topic.id} 收取邮件", True)
 
         password = os.environ.get(self.config.password_env, "")
         if not password:
@@ -64,6 +73,8 @@ class ScholarAlertsFetcher:
                 if self.config.search_criterion.upper() == "UNSEEN":
                     mail.store(message_id, "+FLAGS", "\\Seen")
 
+            if progress:
+                progress(f"Scholar Alerts {topic.id} 命中 {len(candidates)}", False)
             LOGGER.info("scholar alerts topic=%s fetched=%s", topic.id, len(candidates))
             return candidates
 

@@ -1,0 +1,18 @@
+请仅依据提供的信息进行总结，不要虚构实验结果。
+summary 需要 120-220 字中文；problem/method 用 1-2 句；contributions 和 limitations 各给 2-4 条短句数组；tags 给 3-8 个关键词。
+特别关注：
+1. 这篇论文解决了什么问题
+2. 提出了什么核心方法
+3. 主要应用在什么领域或场景
+
+标题: {title}
+作者: {authors}
+发表信息: venue={venue}, published_at={published_at}
+相关主题:
+{topics_text}
+
+摘要:
+{abstract}
+
+全文节选:
+{fulltext}

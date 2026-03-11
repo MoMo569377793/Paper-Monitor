@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
 import argparse
 import logging
 
 from paper_monitor.config import load_settings, write_default_config
 from paper_monitor.enrichment import EnrichmentPipeline
 from paper_monitor.llm import LLMClient
+from paper_monitor.llm_registry import build_runtime_variants
 from paper_monitor.pipeline import MonitorPipeline
-from paper_monitor.reports import generate_report
+from paper_monitor.reports import generate_comparison_report, generate_report
 from paper_monitor.scheduler import run_daemon
 from paper_monitor.storage import Database
 from paper_monitor.utils import ensure_directory, today_string
@@ -28,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     fetch_parser = subparsers.add_parser("fetch", help="仅抓取并写入数据库")
     fetch_parser.add_argument("--source", action="append", choices=["arxiv", "dblp", "google_scholar_alerts"])
+    fetch_parser.add_argument("--start-year", type=int, help="首次回填时只保留不早于该年份的论文")
+    fetch_parser.add_argument("--recent-limit", type=int, help="按时间顺序保留最近多少篇论文")
+    fetch_parser.add_argument("--page-size", type=int, help="单次请求分页大小")
 
     enrich_parser = subparsers.add_parser("enrich", help="下载 PDF、抽取全文并刷新摘要")
     enrich_parser.add_argument("--limit", type=int, help="本轮最多增强多少篇论文")
@@ -35,12 +40,23 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_parser.add_argument("--classification", action="append", choices=["relevant", "maybe"])
     enrich_parser.add_argument("--force", action="store_true", help="忽略缓存，重新下载或重新抽取")
     enrich_parser.add_argument("--with-llm", action="store_true", help="若已配置 LLM，则强制尝试生成 LLM 摘要")
+    enrich_parser.add_argument("--extra-config", action="append", help="额外加载一份配置文件中的 LLM 变体")
+    enrich_parser.add_argument("--skip-pdf", action="store_true", help="跳过 PDF 下载与全文抽取，只基于标题/摘要生成总结")
+    enrich_parser.add_argument("--workers", type=int, default=1, help="增强阶段并发 worker 数，默认 1")
 
     report_parser = subparsers.add_parser("report", help="仅生成报告")
     report_parser.add_argument("--date", help="报告日期，格式 YYYY-MM-DD，默认今天")
     report_parser.add_argument("--type", default="daily", choices=["daily", "weekly"])
     report_parser.add_argument("--days", type=int, help="统计窗口天数，默认使用配置中的 report.lookback_days")
     report_parser.add_argument("--with-llm", action="store_true", help="若已配置 LLM，则生成主题级聚合摘要")
+    report_parser.add_argument("--extra-config", action="append", help="额外加载一份配置文件中的 LLM 变体")
+
+    compare_parser = subparsers.add_parser("compare-report", help="使用两套配置生成并排对比报告")
+    compare_parser.add_argument("--date", help="报告日期，格式 YYYY-MM-DD，默认今天")
+    compare_parser.add_argument("--type", default="weekly", choices=["daily", "weekly"])
+    compare_parser.add_argument("--days", type=int, help="统计窗口天数，默认使用左侧配置中的 report.lookback_days")
+    compare_parser.add_argument("--left-config", default="config/config.json", help="左侧配置文件路径")
+    compare_parser.add_argument("--right-config", default="config/config.example.json", help="右侧配置文件路径")
 
     run_once_parser = subparsers.add_parser("run-once", help="抓取后立即生成报告")
     run_once_parser.add_argument("--date", help="报告日期，格式 YYYY-MM-DD，默认今天")
@@ -50,12 +66,21 @@ def build_parser() -> argparse.ArgumentParser:
     run_once_parser.add_argument("--enrich", action="store_true", help="抓取后执行全文增强")
     run_once_parser.add_argument("--enrich-limit", type=int, help="本轮增强的论文数量上限")
     run_once_parser.add_argument("--with-llm", action="store_true", help="若已配置 LLM，则启用 LLM 摘要")
+    run_once_parser.add_argument("--extra-config", action="append", help="额外加载一份配置文件中的 LLM 变体")
+    run_once_parser.add_argument("--skip-pdf", action="store_true", help="跳过 PDF 下载与全文抽取，只基于标题/摘要生成总结")
+    run_once_parser.add_argument("--workers", type=int, default=1, help="增强阶段并发 worker 数，默认 1")
+    run_once_parser.add_argument("--start-year", type=int, help="首次回填时只保留不早于该年份的论文")
+    run_once_parser.add_argument("--recent-limit", type=int, help="按时间顺序保留最近多少篇论文")
+    run_once_parser.add_argument("--page-size", type=int, help="单次请求分页大小")
 
     daemon_parser = subparsers.add_parser("daemon", help="持续轮询抓取，并覆盖更新当天报告")
     daemon_parser.add_argument("--type", default="daily", choices=["daily", "weekly"])
     daemon_parser.add_argument("--loops", type=int, help="仅运行指定轮次，便于测试")
     daemon_parser.add_argument("--enrich", action="store_true", help="每轮抓取后执行全文增强")
     daemon_parser.add_argument("--with-llm", action="store_true", help="若已配置 LLM，则启用 LLM 摘要")
+    daemon_parser.add_argument("--extra-config", action="append", help="额外加载一份配置文件中的 LLM 变体")
+    daemon_parser.add_argument("--skip-pdf", action="store_true", help="跳过 PDF 下载与全文抽取，只基于标题/摘要生成总结")
+    daemon_parser.add_argument("--workers", type=int, default=1, help="增强阶段并发 worker 数，默认 1")
 
     return parser
 
@@ -99,19 +124,55 @@ def main(argv: list[str] | None = None) -> int:
         print(f"数据库路径: {settings.database_path}")
         return 0
 
+    if args.command == "compare-report":
+        left_settings = load_settings(args.left_config)
+        right_settings = load_settings(args.right_config)
+        if [topic.id for topic in left_settings.topics] != [topic.id for topic in right_settings.topics]:
+            raise ValueError("compare-report 需要两份配置使用相同 topic 列表。")
+        if left_settings.database_path != right_settings.database_path:
+            raise ValueError("compare-report 需要两份配置指向同一个数据库，以便对比同一批论文。")
+
+        compare_db = Database(left_settings.database_path, left_settings.timezone)
+        compare_db.initialize()
+        try:
+            report_date = args.date or today_string(left_settings.timezone)
+            variants = build_runtime_variants(left_settings, [args.right_config])
+            paths = generate_comparison_report(
+                compare_db,
+                left_settings,
+                report_date=report_date,
+                report_type=args.type,
+                variants=variants,
+                lookback_days=args.days,
+            )
+        finally:
+            compare_db.close()
+
+        print(f"对比报告已生成: {paths['markdown']}")
+        print(f"HTML: {paths['html']}")
+        print(f"JSON: {paths['json']}")
+        return 0
+
     db, pipeline = _open_database(args.config)
     settings = pipeline.settings
-    enrichment_pipeline = EnrichmentPipeline(settings, db)
-    llm_client = LLMClient(settings.llm)
-    if getattr(args, "with_llm", False) and not llm_client.enabled:
+    extra_configs = getattr(args, "extra_config", None) or []
+    runtime_variants = build_runtime_variants(settings, extra_configs)
+    enabled_variants = [variant for variant in runtime_variants if variant.client.enabled]
+    enrichment_pipeline = EnrichmentPipeline(settings, db, llm_variants=runtime_variants)
+    llm_client = enabled_variants[0].client if enabled_variants else LLMClient(settings.llm)
+    if getattr(args, "with_llm", False) and not enabled_variants:
         LOGGER.warning(
-            "检测到 --with-llm，但当前 LLM 未启用。请检查 llm.enabled、base_url、model 和 API key 环境变量 `%s`。",
-            settings.llm.api_key_env,
+            "检测到 --with-llm，但当前没有可用的 LLM 变体。请检查 API key 环境变量和额外配置。"
         )
     try:
         if args.command == "fetch":
             selected_sources = set(args.source or [])
-            stats = pipeline.run_fetch(selected_sources=selected_sources or None)
+            stats = pipeline.run_fetch(
+                selected_sources=selected_sources or None,
+                start_year=args.start_year,
+                recent_limit=args.recent_limit,
+                page_size=args.page_size,
+            )
             print(
                 f"抓取完成: fetched={stats.fetched}, processed={stats.processed}, "
                 f"stored={stats.stored}, matched={stats.matched}"
@@ -129,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
                 classifications=args.classification,
                 force=args.force,
                 use_llm=args.with_llm or None,
+                skip_document_processing=args.skip_pdf,
+                workers=args.workers,
             )
             print(
                 f"增强完成: enriched={stats.enriched}, downloaded_pdfs={stats.downloaded_pdfs}, "
@@ -149,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
                 report_type=args.type,
                 lookback_days=args.days,
                 llm_client=llm_client,
+                llm_variants=enabled_variants,
                 use_llm_topic_digest=args.with_llm,
             )
             print(f"报告已生成: {paths['markdown']}")
@@ -158,13 +222,20 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "run-once":
             selected_sources = set(args.source or [])
-            stats = pipeline.run_fetch(selected_sources=selected_sources or None)
+            stats = pipeline.run_fetch(
+                selected_sources=selected_sources or None,
+                start_year=args.start_year,
+                recent_limit=args.recent_limit,
+                page_size=args.page_size,
+            )
             enrichment_stats = None
             if args.enrich:
                 enrichment_stats = enrichment_pipeline.run(
                     limit=args.enrich_limit,
                     force=False,
                     use_llm=args.with_llm or None,
+                    skip_document_processing=args.skip_pdf,
+                    workers=args.workers,
                 )
             report_date = args.date or today_string(settings.timezone)
             paths = generate_report(
@@ -174,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
                 report_type=args.type,
                 lookback_days=args.days,
                 llm_client=llm_client,
+                llm_variants=enabled_variants,
                 use_llm_topic_digest=args.with_llm,
             )
             print(
@@ -207,6 +279,9 @@ def main(argv: list[str] | None = None) -> int:
                 loop_limit=args.loops,
                 enrich=args.enrich,
                 use_llm=args.with_llm or None,
+                llm_variants=enabled_variants,
+                skip_document_processing=args.skip_pdf,
+                workers=args.workers,
             )
             return 0
 

@@ -9,3 +9,4 @@ reports/weekly/*.html
 exports/*.json
 artifacts/pdfs/*
 artifacts/text/*
+*.env

@@ -6,14 +6,78 @@ from pathlib import Path
 
 from paper_monitor.config import load_settings
 from paper_monitor.enrichment import DocumentArtifacts, EnrichmentPipeline
-from paper_monitor.models import LLMResult
+from paper_monitor.models import FetchPlan, LLMResult
 from paper_monitor.models import PaperCandidate, RunStats
 from paper_monitor.pipeline import MonitorPipeline
-from paper_monitor.reports import generate_report
+from paper_monitor.reports import generate_comparison_report, generate_report
 from paper_monitor.storage import Database
 
 
 class MonitorPipelineTest(unittest.TestCase):
+    def test_topic_recent_limit_is_applied_after_cross_source_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            candidates: list[PaperCandidate] = []
+            for index in range(70):
+                candidates.append(
+                    PaperCandidate(
+                        source_name="arxiv",
+                        source_paper_id=f"arxiv-{index}",
+                        query_text="fixture",
+                        title=f"Shared Paper {index}" if index < 20 else f"Arxiv Unique Paper {index}",
+                        abstract="matrix-free finite element and partial assembly",
+                        authors=["Alice"],
+                        published_at=f"2026-03-{28 - (index % 20):02d}T09:00:00+08:00",
+                        updated_at=f"2026-03-{28 - (index % 20):02d}T09:00:00+08:00",
+                        primary_url=f"https://arxiv.org/abs/{index}",
+                        pdf_url=f"https://arxiv.org/pdf/{index}.pdf",
+                        doi=f"10.1000/shared-{index}" if index < 20 else "",
+                        arxiv_id=f"{index}",
+                        venue="arXiv",
+                        year=2026,
+                        categories=["cs.NA"],
+                        raw={"fixture": True},
+                    )
+                )
+            for index in range(70):
+                candidates.append(
+                    PaperCandidate(
+                        source_name="dblp",
+                        source_paper_id=f"dblp-{index}",
+                        query_text="fixture",
+                        title=f"Shared Paper {index}" if index < 20 else f"DBLP Unique Paper {index}",
+                        abstract="matrix-free finite element and multigrid",
+                        authors=["Bob"],
+                        published_at=f"2026-03-{28 - (index % 20):02d}",
+                        updated_at=f"2026-03-{28 - (index % 20):02d}",
+                        primary_url=f"https://dblp.org/rec/{index}",
+                        pdf_url="",
+                        doi=f"10.1000/shared-{index}" if index < 20 else "",
+                        arxiv_id="",
+                        venue="SC",
+                        year=2026,
+                        categories=["Conference"],
+                        raw={"fixture": True},
+                    )
+                )
+
+            selected = pipeline._select_topic_candidates(candidates, FetchPlan(recent_limit=100, page_size=50))
+            logical_titles = {candidate.title for candidate in selected}
+
+            self.assertEqual(len(logical_titles), 100)
+            self.assertLessEqual(len(selected), 120)
+
+            db.close()
+
     def test_pipeline_scoring_and_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -190,6 +254,76 @@ class MonitorPipelineTest(unittest.TestCase):
 
             db.close()
 
+    def test_enrichment_candidates_prioritize_missing_llm_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            first = PaperCandidate(
+                source_name="arxiv",
+                source_paper_id="2801.00001",
+                query_text="FlashAttention",
+                title="FlashAttention Kernel Fusion for Incremental Scheduling",
+                abstract="kernel fusion and compiler scheduling for transformer inference",
+                authors=["Alice"],
+                published_at="2026-03-10T09:00:00+08:00",
+                updated_at="2026-03-10T09:00:00+08:00",
+                primary_url="https://arxiv.org/abs/2801.00001",
+                pdf_url="https://arxiv.org/pdf/2801.00001.pdf",
+                doi="",
+                arxiv_id="2801.00001",
+                venue="arXiv",
+                year=2026,
+                categories=["cs.LG"],
+                raw={"fixture": True},
+            )
+            second = PaperCandidate(
+                source_name="arxiv",
+                source_paper_id="2801.00002",
+                query_text="FlashAttention",
+                title="FlashAttention Kernel Fusion for Existing Papers",
+                abstract="kernel fusion and compiler scheduling for transformer inference",
+                authors=["Bob"],
+                published_at="2026-03-10T09:00:00+08:00",
+                updated_at="2026-03-10T09:00:00+08:00",
+                primary_url="https://arxiv.org/abs/2801.00002",
+                pdf_url="https://arxiv.org/pdf/2801.00002.pdf",
+                doi="",
+                arxiv_id="2801.00002",
+                venue="arXiv",
+                year=2026,
+                categories=["cs.LG"],
+                raw={"fixture": True},
+            )
+            pipeline._process_candidate(first, RunStats())
+            pipeline._process_candidate(second, RunStats())
+            db.upsert_paper_llm_summary(
+                2,
+                variant_id="config-example-gpt-5-4",
+                variant_label="gpt-5.4",
+                provider="openai_responses",
+                base_url="https://example.invalid/v1",
+                model="gpt-5.4",
+                summary_text="已有摘要",
+                summary_basis="llm+abstract+metadata",
+                tags=["flashattention"],
+                structured={"summary": "已有摘要"},
+                usage={},
+            )
+
+            ordered = db.fetch_enrichment_candidates(limit=2, classifications=["relevant", "maybe"])
+            self.assertEqual(ordered[0].id, 1)
+            self.assertEqual(ordered[1].id, 2)
+
+            db.close()
+
     def test_report_includes_topic_digest_when_llm_client_is_provided(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -253,9 +387,111 @@ class MonitorPipelineTest(unittest.TestCase):
                 use_llm_topic_digest=True,
             )
             markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
-            self.assertIn("LLM 主题概览", markdown)
+            self.assertIn("gpt-5.4 主题概览", markdown)
             self.assertIn("attention kernel 与 kernel fusion", markdown)
-            self.assertIn("LLM Token", markdown)
+            self.assertIn("gpt-5.4 Token", markdown)
+
+            db.close()
+
+    def test_comparison_report_contains_both_model_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            pipeline._process_candidate(
+                PaperCandidate(
+                    source_name="arxiv",
+                    source_paper_id="2701.00001",
+                    query_text="matrix-free finite element",
+                    title="Matrix-Free Multigrid for High-Order FEM",
+                    abstract="We study matrix-free multigrid and partial assembly for high-order FEM.",
+                    authors=["Alice"],
+                    published_at="2026-03-10T09:00:00+08:00",
+                    updated_at="2026-03-10T09:00:00+08:00",
+                    primary_url="https://arxiv.org/abs/2701.00001",
+                    pdf_url="https://arxiv.org/pdf/2701.00001.pdf",
+                    doi="",
+                    arxiv_id="2701.00001",
+                    venue="arXiv",
+                    year=2026,
+                    categories=["cs.NA"],
+                    raw={"fixture": True},
+                ),
+                RunStats(),
+            )
+
+            class FakeDigestClientA:
+                enabled = True
+
+                def generate_topic_digest(self, topic_name, description, entries):  # noqa: ANN001
+                    if not entries:
+                        return None
+                    return type(
+                        "Digest",
+                        (),
+                        {
+                            "overview": f"A:{topic_name}",
+                            "highlights": ["A1", "A2"],
+                            "watchlist": ["A3"],
+                            "tags": ["a"],
+                            "structured": {"usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}},
+                        },
+                    )()
+
+            class FakeDigestClientB:
+                enabled = True
+
+                def generate_topic_digest(self, topic_name, description, entries):  # noqa: ANN001
+                    if not entries:
+                        return None
+                    return type(
+                        "Digest",
+                        (),
+                        {
+                            "overview": f"B:{topic_name}",
+                            "highlights": ["B1", "B2"],
+                            "watchlist": ["B3"],
+                            "tags": ["b"],
+                            "structured": {"usage": {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132}},
+                        },
+                    )()
+
+            paths = generate_comparison_report(
+                db,
+                settings,
+                report_date="2026-03-10",
+                report_type="weekly",
+                variants=[
+                    {
+                        "slug": "config",
+                        "label": "config.json",
+                        "model": "gpt-5",
+                        "base_url": "https://left.example/v1",
+                        "llm_client": FakeDigestClientA(),
+                    },
+                    {
+                        "slug": "config-example",
+                        "label": "config.example.json",
+                        "model": "gpt-5.4",
+                        "base_url": "https://right.example/v1",
+                        "llm_client": FakeDigestClientB(),
+                    },
+                ],
+                lookback_days=7,
+            )
+            markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
+            self.assertIn("config.json", markdown)
+            self.assertIn("config.example.json", markdown)
+            self.assertIn("A:有限元分析 Matrix-Free 算法优化", markdown)
+            self.assertIn("B:有限元分析 Matrix-Free 算法优化", markdown)
+            self.assertIn("gpt-5.4", markdown)
 
             db.close()
 

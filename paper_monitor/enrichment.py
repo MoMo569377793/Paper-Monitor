@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import re
 import subprocess
@@ -10,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from paper_monitor.llm import LLMClient
+from paper_monitor.llm_registry import LLMRuntimeVariant
 from paper_monitor.models import EnrichmentConfig, PaperRecord, RunStats, Settings
+from paper_monitor.progress import ProgressBar
 from paper_monitor.storage import Database
 from paper_monitor.summarize import build_paper_summary
 from paper_monitor.utils import (
@@ -189,6 +192,7 @@ class EnrichmentPipeline:
         db: Database,
         document_processor: DocumentProcessor | None = None,
         llm_client: LLMClient | None = None,
+        llm_variants: list[LLMRuntimeVariant] | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
@@ -198,7 +202,21 @@ class EnrichmentPipeline:
             user_agent=user_agent,
             timezone_name=settings.timezone,
         )
-        self.llm_client = llm_client or LLMClient(settings.llm)
+        if llm_variants is not None:
+            self.llm_variants = llm_variants
+        else:
+            default_client = llm_client or LLMClient(settings.llm)
+            self.llm_variants = [
+                LLMRuntimeVariant(
+                    variant_id=settings.llm.variant_id,
+                    label=settings.llm.label or settings.llm.model or settings.llm.variant_id,
+                    provider=settings.llm.provider,
+                    base_url=settings.llm.base_url,
+                    model=settings.llm.model,
+                    config_path=settings.config_path,
+                    client=default_client,
+                )
+            ]
 
     def run(
         self,
@@ -208,6 +226,8 @@ class EnrichmentPipeline:
         classifications: list[str] | None = None,
         force: bool = False,
         use_llm: bool | None = None,
+        skip_document_processing: bool = False,
+        workers: int = 1,
     ) -> RunStats:
         stats = RunStats()
         if not self.settings.enrichment.enabled and not force:
@@ -219,25 +239,207 @@ class EnrichmentPipeline:
             classifications=selected_classifications,
             topic_ids=topic_ids,
         )
-        use_llm_effective = self.llm_client.enabled if use_llm is None else (use_llm and self.llm_client.enabled)
+        progress_bar = ProgressBar("增强", len(candidates) or 1)
+        enabled_variants = [variant for variant in self.llm_variants if variant.client.enabled]
+        use_llm_effective = bool(enabled_variants) if use_llm is None else (use_llm and bool(enabled_variants))
+        worker_count = max(int(workers or 1), 1)
+
+        if skip_document_processing and use_llm_effective and worker_count > 1:
+            return self._run_llm_only_concurrent(
+                candidates,
+                stats,
+                force=force,
+                progress_bar=progress_bar,
+                workers=worker_count,
+            )
 
         for paper in candidates:
-            if self._should_skip(paper, force=force, use_llm=use_llm_effective):
+            title = shorten(paper.title, 56)
+            if self._should_skip(
+                paper,
+                force=force,
+                use_llm=use_llm_effective,
+                skip_document_processing=skip_document_processing,
+            ):
                 stats.skipped += 1
+                progress_bar.advance(detail=f"跳过 {title}")
                 continue
             try:
-                self._enrich_paper(paper, stats, force=force, use_llm=use_llm_effective)
+                progress_bar.set_detail(f"处理中 {title}")
+                self._enrich_paper(
+                    paper,
+                    stats,
+                    force=force,
+                    use_llm=use_llm_effective,
+                    skip_document_processing=skip_document_processing,
+                    progress_bar=progress_bar,
+                )
+                progress_bar.advance(detail=f"完成 {title}")
             except (OSError, subprocess.SubprocessError, urllib.error.URLError) as exc:
                 LOGGER.warning("enrichment failed for paper_id=%s: %s", paper.id, exc)
                 stats.errors.append(f"paper:{paper.id}:{exc}")
+                progress_bar.advance(detail=f"失败 {title}")
+        progress_bar.close(
+            f"增强完成 {stats.enriched} 篇, LLM 总结 {stats.llm_summaries} 条, 跳过 {stats.skipped} 篇"
+        )
         return stats
 
-    def _should_skip(self, paper: PaperRecord, *, force: bool, use_llm: bool) -> bool:
+    def _run_llm_only_concurrent(
+        self,
+        candidates: list[PaperRecord],
+        stats: RunStats,
+        *,
+        force: bool,
+        progress_bar: ProgressBar,
+        workers: int,
+    ) -> RunStats:
+        jobs = []
+        for paper in candidates:
+            title = shorten(paper.title, 56)
+            if self._should_skip(
+                paper,
+                force=force,
+                use_llm=True,
+                skip_document_processing=True,
+            ):
+                stats.skipped += 1
+                progress_bar.advance(detail=f"跳过 {title}")
+                continue
+            evaluations = self.db.fetch_paper_evaluations(paper.id)
+            existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if not force else set()
+            target_variants = [
+                variant
+                for variant in self.llm_variants
+                if variant.client.enabled and (force or variant.variant_id not in existing_variant_ids)
+            ]
+            jobs.append((paper, evaluations, target_variants))
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {
+                executor.submit(self._generate_llm_results, paper, evaluations, target_variants): (
+                    paper,
+                    evaluations,
+                )
+                for paper, evaluations, target_variants in jobs
+            }
+            for future in as_completed(future_map):
+                paper, evaluations = future_map[future]
+                title = shorten(paper.title, 56)
+                try:
+                    llm_results = future.result()
+                    self._persist_paper_results(
+                        paper,
+                        evaluations,
+                        llm_results,
+                        stats,
+                        use_llm=True,
+                    )
+                    progress_bar.advance(detail=f"完成 {title}")
+                except (OSError, subprocess.SubprocessError, urllib.error.URLError) as exc:
+                    LOGGER.warning("enrichment failed for paper_id=%s: %s", paper.id, exc)
+                    stats.errors.append(f"paper:{paper.id}:{exc}")
+                    progress_bar.advance(detail=f"失败 {title}")
+
+        progress_bar.close(
+            f"增强完成 {stats.enriched} 篇, LLM 总结 {stats.llm_summaries} 条, 跳过 {stats.skipped} 篇"
+        )
+        return stats
+
+    def _generate_llm_results(
+        self,
+        paper: PaperRecord,
+        evaluations,
+        target_variants: list[LLMRuntimeVariant],
+    ) -> list[tuple[LLMRuntimeVariant, object]]:
+        llm_results: list[tuple[LLMRuntimeVariant, object]] = []
+        for variant in target_variants:
+            llm_result = variant.client.generate_summary(paper, evaluations)
+            if llm_result is None:
+                continue
+            llm_results.append((variant, llm_result))
+        return llm_results
+
+    def _persist_paper_results(
+        self,
+        paper: PaperRecord,
+        evaluations,
+        llm_results: list[tuple[LLMRuntimeVariant, object]],
+        stats: RunStats,
+        *,
+        use_llm: bool,
+    ) -> None:
+        primary_llm_result = None
+        for variant, llm_result in llm_results:
+            usage = {}
+            if isinstance(llm_result.structured, dict):
+                usage = llm_result.structured.get("usage", {})
+            self.db.upsert_paper_llm_summary(
+                paper.id,
+                variant_id=variant.variant_id,
+                variant_label=variant.label,
+                provider=variant.provider,
+                base_url=variant.base_url,
+                model=variant.model,
+                summary_text=llm_result.summary_text,
+                summary_basis=llm_result.summary_basis,
+                tags=llm_result.tags,
+                structured=llm_result.structured,
+                usage=usage if isinstance(usage, dict) else {},
+            )
+            if primary_llm_result is None:
+                primary_llm_result = (variant, llm_result)
+            stats.llm_summaries += 1
+
+        if primary_llm_result is not None:
+            primary_variant, llm_result = primary_llm_result
+            legacy_structured = dict(llm_result.structured)
+            legacy_structured.update(
+                {
+                    "variant_id": primary_variant.variant_id,
+                    "variant_label": primary_variant.label,
+                    "model": primary_variant.model,
+                }
+            )
+            self.db.update_paper_analysis(
+                paper.id,
+                llm_result.summary_text,
+                llm_result.summary_basis,
+                llm_result.tags,
+                llm_summary=legacy_structured,
+            )
+        elif use_llm and paper.summary_basis.startswith("llm+") and paper.summary_text:
+            self.db.update_paper_analysis(
+                paper.id,
+                paper.summary_text,
+                paper.summary_basis,
+                paper.tags,
+                llm_summary=paper.llm_summary,
+            )
+        else:
+            summary_text, basis, tags = build_paper_summary(paper, evaluations)
+            self.db.update_paper_analysis(paper.id, summary_text, basis, tags)
+
+        stats.enriched += 1
+
+    def _should_skip(
+        self,
+        paper: PaperRecord,
+        *,
+        force: bool,
+        use_llm: bool,
+        skip_document_processing: bool = False,
+    ) -> bool:
         if force:
             return False
-        needs_pdf = self.document_processor.can_try_pdf(paper) and paper.fulltext_status != "extracted"
-        needs_pdf_state_refresh = paper.pdf_status == "pending"
-        needs_llm = use_llm and not paper.summary_basis.startswith("llm+")
+        needs_pdf = (
+            not skip_document_processing
+            and self.document_processor.can_try_pdf(paper)
+            and paper.fulltext_status != "extracted"
+        )
+        needs_pdf_state_refresh = not skip_document_processing and paper.pdf_status == "pending"
+        existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if use_llm else set()
+        target_variant_ids = {variant.variant_id for variant in self.llm_variants if variant.client.enabled}
+        needs_llm = use_llm and bool(target_variant_ids - existing_variant_ids)
         needs_offline_refresh = (
             not use_llm
             and paper.fulltext_status == "extracted"
@@ -246,8 +448,20 @@ class EnrichmentPipeline:
         needs_initial_summary = not paper.summary_text
         return not (needs_pdf or needs_pdf_state_refresh or needs_llm or needs_offline_refresh or needs_initial_summary)
 
-    def _enrich_paper(self, paper: PaperRecord, stats: RunStats, *, force: bool, use_llm: bool) -> None:
-        if force or paper.fulltext_status != "extracted" or paper.pdf_status == "pending":
+    def _enrich_paper(
+        self,
+        paper: PaperRecord,
+        stats: RunStats,
+        *,
+        force: bool,
+        use_llm: bool,
+        skip_document_processing: bool,
+        progress_bar: ProgressBar | None = None,
+    ) -> None:
+        title = shorten(paper.title, 56)
+        if not skip_document_processing and (force or paper.fulltext_status != "extracted" or paper.pdf_status == "pending"):
+            if progress_bar:
+                progress_bar.set_detail(f"下载/抽取 {title}")
             artifacts = self.document_processor.enrich(paper, force=force)
             self.db.update_paper_assets(
                 paper.id,
@@ -264,21 +478,31 @@ class EnrichmentPipeline:
             if artifacts.was_extracted:
                 stats.extracted_texts += 1
             paper = self.db.get_paper(paper.id)
+        elif skip_document_processing and progress_bar:
+            progress_bar.set_detail(f"跳过 PDF，直接总结 {title}")
 
         evaluations = self.db.fetch_paper_evaluations(paper.id)
+        existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if use_llm and not force else set()
+        llm_results = []
+        if use_llm:
+            for variant in self.llm_variants:
+                if not variant.client.enabled:
+                    continue
+                if not force and variant.variant_id in existing_variant_ids:
+                    continue
+                if progress_bar:
+                    progress_bar.set_detail(f"{title} -> {variant.label}")
+                llm_result = variant.client.generate_summary(paper, evaluations)
+                if llm_result is None:
+                    continue
+                llm_results.append((variant, llm_result))
 
-        llm_result = self.llm_client.generate_summary(paper, evaluations) if use_llm else None
-        if llm_result is not None:
-            self.db.update_paper_analysis(
-                paper.id,
-                llm_result.summary_text,
-                llm_result.summary_basis,
-                llm_result.tags,
-                llm_summary=llm_result.structured,
-            )
-            stats.llm_summaries += 1
-        else:
-            summary_text, basis, tags = build_paper_summary(paper, evaluations)
-            self.db.update_paper_analysis(paper.id, summary_text, basis, tags)
-
-        stats.enriched += 1
+        if not llm_results and progress_bar:
+            progress_bar.set_detail(f"离线总结 {title}")
+        self._persist_paper_results(
+            paper,
+            evaluations,
+            llm_results,
+            stats,
+            use_llm=use_llm,
+        )

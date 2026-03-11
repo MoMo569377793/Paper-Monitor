@@ -62,6 +62,8 @@ class EnrichmentConfig:
 
 @dataclass(slots=True)
 class LLMConfig:
+    variant_id: str = ""
+    label: str = ""
     enabled: bool = False
     provider: str = "openai_compatible"
     base_url: str = ""
@@ -77,6 +79,21 @@ class LLMConfig:
 
 
 @dataclass(slots=True)
+class BootstrapConfig:
+    start_year: int | None = None
+    recent_limit: int | None = None
+    page_size: int = 25
+
+
+@dataclass(slots=True)
+class PromptPaths:
+    paper_summary_system: Path = Path("prompts/paper_summary_system.txt")
+    paper_summary_user: Path = Path("prompts/paper_summary_user.txt")
+    topic_digest_system: Path = Path("prompts/topic_digest_system.txt")
+    topic_digest_user: Path = Path("prompts/topic_digest_user.txt")
+
+
+@dataclass(slots=True)
 class Settings:
     base_dir: Path
     config_path: Path
@@ -85,12 +102,15 @@ class Settings:
     export_dir: Path
     poll_minutes: int
     timezone: str
+    bootstrap: BootstrapConfig
     arxiv: GenericSourceConfig
     dblp: GenericSourceConfig
     scholar_alerts: ScholarAlertsConfig
     report: ReportConfig
     enrichment: EnrichmentConfig
+    prompt_paths: PromptPaths
     llm: LLMConfig
+    llm_variants: list[LLMConfig]
     topics: list[TopicConfig]
 
 
@@ -186,6 +206,30 @@ class TopicDigest:
     watchlist: list[str]
     tags: list[str]
     structured: dict[str, Any]
+
+
+@dataclass(slots=True)
+class PaperLLMSummary:
+    paper_id: int
+    variant_id: str
+    variant_label: str
+    provider: str
+    base_url: str
+    model: str
+    summary_text: str
+    summary_basis: str
+    tags: list[str]
+    structured: dict[str, Any]
+    usage: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class FetchPlan:
+    start_year: int | None = None
+    recent_limit: int | None = None
+    page_size: int = 25
 
 
 @dataclass(slots=True)

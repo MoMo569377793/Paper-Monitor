@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from paper_monitor.models import PaperRecord, TopicConfig, TopicEvaluation
-from paper_monitor.utils import keyword_in_text, normalize_whitespace, unique_strings
+from paper_monitor.utils import keyword_in_text, normalize_title, normalize_whitespace, unique_strings
 
 
 def _combined_text(paper: PaperRecord) -> str:
@@ -12,13 +12,13 @@ def _combined_text(paper: PaperRecord) -> str:
         " ".join(paper.categories),
         " ".join(paper.tags),
     ]
-    return normalize_whitespace(" ".join(part for part in parts if part)).lower()
+    return normalize_title(" ".join(part for part in parts if part))
 
 
 def evaluate_paper_against_topic(paper: PaperRecord, topic: TopicConfig) -> TopicEvaluation:
     text = _combined_text(paper)
-    venue_text = normalize_whitespace(paper.venue).lower()
-    categories_text = " ".join(category.lower() for category in paper.categories)
+    venue_text = normalize_title(paper.venue)
+    categories_text = normalize_title(" ".join(paper.categories))
 
     score = 0.0
     matched_keywords: list[str] = []

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+import http.client
 import urllib.error
 import urllib.request
 from typing import Any
@@ -17,6 +18,7 @@ from paper_monitor.models import (
     TopicDigest,
     TopicEvaluation,
 )
+from paper_monitor.prompts import PromptLibrary
 from paper_monitor.utils import shorten, unique_strings
 
 
@@ -24,12 +26,14 @@ LOGGER = logging.getLogger(__name__)
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_LLM_USER_AGENT = "paper-monitor/0.1 (+local)"
+THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
 
 
 class LLMClient:
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(self, config: LLMConfig, prompt_library: PromptLibrary | None = None) -> None:
         self.config = config
         self.provider = config.provider.strip().lower()
+        self.prompt_library = prompt_library
         self.api_key = self._resolve_api_key()
         requires_auth = "api.openai.com" in config.base_url or self.provider in {"openai_responses", "openai", "responses"}
         self.enabled = bool(config.enabled and config.base_url and config.model and (self.api_key or not requires_auth))
@@ -43,15 +47,38 @@ class LLMClient:
         if not self.enabled:
             return None
 
-        parsed, usage = self._request_structured_json(
-            system_prompt=(
-                "你是一个严谨的中文论文分析助手。"
-                "请根据提供的标题、摘要、全文节选和相关性标签，输出简洁、具体、避免空话的 JSON。"
-            ),
-            user_prompt=self._build_paper_prompt(paper, evaluations),
-            schema_name="paper_summary",
-            schema=self._paper_summary_schema(),
-        )
+        prefer_compact = self._prefers_compact_mode()
+        parsed = None
+        usage: dict[str, Any] = {}
+        if prefer_compact:
+            parsed, usage = self._request_structured_json(
+                system_prompt=(
+                    self._paper_summary_system_prompt()
+                    + " 不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
+                ),
+                user_prompt=self._build_compact_paper_prompt(paper, evaluations),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+                max_output_tokens=max(self.config.max_output_tokens, 1200),
+            )
+        if not parsed:
+            parsed, usage = self._request_structured_json(
+                system_prompt=self._paper_summary_system_prompt(),
+                user_prompt=self._build_paper_prompt(paper, evaluations),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+            )
+        if not parsed and not prefer_compact:
+            parsed, usage = self._request_structured_json(
+                system_prompt=(
+                    self._paper_summary_system_prompt()
+                    + " 不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
+                ),
+                user_prompt=self._build_compact_paper_prompt(paper, evaluations),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+                max_output_tokens=max(self.config.max_output_tokens, 1200),
+            )
         if not parsed:
             return None
 
@@ -70,16 +97,55 @@ class LLMClient:
         if not self.enabled or not self.config.enable_topic_digest or not entries:
             return None
 
+        prefer_compact = self._prefers_compact_mode()
         limited_entries = entries[: self.config.topic_digest_entry_limit]
-        parsed, usage = self._request_structured_json(
-            system_prompt=(
-                "你是一个严谨的中文研究情报分析助手。"
-                "请根据一个主题下的多篇论文信息，生成简洁的中文主题摘要，突出趋势、代表工作和建议关注点。"
-            ),
-            user_prompt=self._build_topic_digest_prompt(topic_name, description, limited_entries),
-            schema_name="topic_digest",
-            schema=self._topic_digest_schema(),
-        )
+        compact_entries = entries[: min(4, len(entries))]
+        system_prompt = self._topic_digest_system_prompt()
+        parsed = None
+        usage: dict[str, Any] = {}
+        if prefer_compact:
+            parsed, usage = self._request_structured_json(
+                system_prompt=(
+                    "你是一个严谨的中文研究情报分析助手。"
+                    "不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
+                    "内容要短，突出趋势、代表工作和建议关注点。"
+                ),
+                user_prompt=self._build_compact_topic_digest_prompt(topic_name, description, compact_entries),
+                schema_name="topic_digest",
+                schema=self._topic_digest_schema(),
+                max_output_tokens=max(self.config.max_output_tokens, 1400),
+            )
+        if not parsed:
+            user_prompt = self._build_topic_digest_prompt(topic_name, description, limited_entries)
+            parsed, usage = self._request_structured_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema_name="topic_digest",
+                schema=self._topic_digest_schema(),
+            )
+        if not parsed:
+            parsed, usage = self._request_structured_json(
+                system_prompt=(
+                    system_prompt
+                    + " 不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
+                ),
+                user_prompt=user_prompt,
+                schema_name="topic_digest",
+                schema=self._topic_digest_schema(),
+                max_output_tokens=max(self.config.max_output_tokens, 1800),
+            )
+        if not parsed and not prefer_compact:
+            parsed, usage = self._request_structured_json(
+                system_prompt=(
+                    "你是一个严谨的中文研究情报分析助手。"
+                    "不要输出思考过程，不要输出<think>标签，不要输出任何解释文本，只输出最终 JSON。"
+                    "内容要短，突出趋势、代表工作和建议关注点。"
+                ),
+                user_prompt=self._build_compact_topic_digest_prompt(topic_name, description, compact_entries),
+                schema_name="topic_digest",
+                schema=self._topic_digest_schema(),
+                max_output_tokens=max(self.config.max_output_tokens, 1400),
+            )
         if not parsed:
             return None
         parsed["usage"] = usage
@@ -98,11 +164,24 @@ class LLMClient:
         user_prompt: str,
         schema_name: str,
         schema: dict[str, Any],
+        max_output_tokens: int | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         if self.provider in {"openai_responses", "openai", "responses"}:
-            content, usage = self._post_responses(system_prompt, user_prompt, schema_name, schema)
+            content, usage = self._post_responses(
+                system_prompt,
+                user_prompt,
+                schema_name,
+                schema,
+                max_output_tokens=max_output_tokens,
+            )
         else:
-            content, usage = self._post_chat_completions(system_prompt, user_prompt, schema_name, schema)
+            content, usage = self._post_chat_completions(
+                system_prompt,
+                user_prompt,
+                schema_name,
+                schema,
+                max_output_tokens=max_output_tokens,
+            )
         if not content:
             return None, usage
         parsed = self._parse_response_json(content)
@@ -116,6 +195,8 @@ class LLMClient:
         user_prompt: str,
         schema_name: str,
         schema: dict[str, Any],
+        *,
+        max_output_tokens: int | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         prompt_with_schema = (
             f"{user_prompt}\n\n"
@@ -125,7 +206,7 @@ class LLMClient:
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_output_tokens,
+            "max_tokens": max_output_tokens or self.config.max_output_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt_with_schema},
@@ -149,13 +230,15 @@ class LLMClient:
         user_prompt: str,
         schema_name: str,
         schema: dict[str, Any],
+        *,
+        max_output_tokens: int | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         payload = {
             "model": self.config.model,
             "instructions": system_prompt,
             "input": user_prompt,
             "temperature": self.config.temperature,
-            "max_output_tokens": self.config.max_output_tokens,
+            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
             "store": self.config.store,
             "text": {
                 "format": {
@@ -199,7 +282,7 @@ class LLMClient:
                     shorten(error_body or str(exc), 320),
                 )
                 return None
-            except (urllib.error.URLError, TimeoutError) as exc:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
                 last_error = exc
                 if attempt < 2:
                     time.sleep(1 + attempt)
@@ -238,9 +321,20 @@ class LLMClient:
             cleaned = cleaned.strip("`")
             if cleaned.startswith("json"):
                 cleaned = cleaned[4:].strip()
+        cleaned = THINK_TAG_RE.sub("", cleaned).strip()
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(cleaned):
+                if char != "{":
+                    continue
+                try:
+                    parsed, _ = decoder.raw_decode(cleaned[index:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
             LOGGER.warning("llm output is not valid json")
             return None
         return parsed if isinstance(parsed, dict) else None
@@ -297,16 +391,26 @@ class LLMClient:
         if len(fulltext) > self.config.max_input_chars:
             fulltext = fulltext[: self.config.max_input_chars]
         abstract = paper.abstract or ""
-
+        context = {
+            "title": paper.title,
+            "authors": ", ".join(paper.authors[:8]) or "未知",
+            "venue": paper.venue or "未知",
+            "published_at": paper.published_at or "未知",
+            "topics_text": topics_text or "- 无",
+            "abstract": shorten(abstract, min(self.config.max_input_chars, 4000)) or "无",
+            "fulltext": fulltext or "无",
+        }
+        if self.prompt_library:
+            return self.prompt_library.paper_summary_user(context)
         return (
             "请仅依据提供的信息进行总结，不要虚构实验结果。\n"
             "summary 需要 120-220 字中文；contributions 和 limitations 各给 2-4 条短句数组；tags 给 3-8 个关键词。\n\n"
-            f"标题: {paper.title}\n"
-            f"作者: {', '.join(paper.authors[:8]) or '未知'}\n"
-            f"发表信息: venue={paper.venue or '未知'}, published_at={paper.published_at or '未知'}\n"
-            f"相关主题:\n{topics_text or '- 无'}\n\n"
-            f"摘要:\n{shorten(abstract, min(self.config.max_input_chars, 4000)) or '无'}\n\n"
-            f"全文节选:\n{fulltext or '无'}\n"
+            f"标题: {context['title']}\n"
+            f"作者: {context['authors']}\n"
+            f"发表信息: venue={context['venue']}, published_at={context['published_at']}\n"
+            f"相关主题:\n{context['topics_text']}\n\n"
+            f"摘要:\n{context['abstract']}\n\n"
+            f"全文节选:\n{context['fulltext']}\n"
         )
 
     def _build_topic_digest_prompt(self, topic_name: str, description: str, entries: list[ReportEntry]) -> str:
@@ -322,6 +426,14 @@ class LLMClient:
                 )
             )
         joined = "\n".join(paper_blocks)
+        context = {
+            "topic_name": topic_name,
+            "description": description,
+            "paper_count": str(len(entries)),
+            "paper_blocks": joined,
+        }
+        if self.prompt_library:
+            return self.prompt_library.topic_digest_user(context)
         return (
             f"主题: {topic_name}\n"
             f"说明: {description}\n"
@@ -330,6 +442,58 @@ class LLMClient:
             "watchlist 应是 2-4 条建议关注的论文或技术线索。\n\n"
             f"{joined}"
         )
+
+    def _build_compact_topic_digest_prompt(self, topic_name: str, description: str, entries: list[ReportEntry]) -> str:
+        paper_blocks: list[str] = []
+        for index, entry in enumerate(entries, start=1):
+            paper_blocks.append(
+                (
+                    f"{index}. 标题: {entry.paper.title}\n"
+                    f"关键词: {', '.join(entry.matched_keywords[:5]) or '无'}\n"
+                    f"摘要: {shorten(entry.paper.summary_text or entry.paper.abstract or '无', 160)}\n"
+                )
+            )
+        joined = "\n".join(paper_blocks)
+        return (
+            f"主题: {topic_name}\n"
+            f"说明: {description}\n"
+            f"样本论文数: {len(entries)}\n\n"
+            "请只根据这些论文，输出一个简洁主题摘要。"
+            "overview 控制在 120-220 字，highlights 和 watchlist 各 2-3 条短句，tags 给 3-6 个短关键词。\n\n"
+            f"{joined}"
+        )
+
+    def _build_compact_paper_prompt(self, paper: PaperRecord, evaluations: list[TopicEvaluation]) -> str:
+        relevant_topics = [item for item in evaluations if item.classification != "irrelevant"]
+        topics_text = "\n".join(
+            f"- {item.topic_name} / score={item.score} / keywords={', '.join(item.matched_keywords[:5])}"
+            for item in relevant_topics[:3]
+        )
+        abstract = shorten(paper.abstract or "", min(self.config.max_input_chars, 1200)) or "无"
+        compact_fulltext = shorten(paper.fulltext_excerpt or "", 800) or "无"
+        return (
+            "请根据标题、摘要和关键信号，输出中文 JSON。"
+            "summary 聚焦解决的问题、核心方法和应用领域，不要虚构实验数据。\n\n"
+            f"标题: {paper.title}\n"
+            f"相关主题:\n{topics_text or '- 无'}\n\n"
+            f"摘要:\n{abstract}\n\n"
+            f"全文节选:\n{compact_fulltext}\n"
+        )
+
+    def _prefers_compact_mode(self) -> bool:
+        model_name = self.config.model.strip().lower()
+        provider_name = self.provider.strip().lower()
+        return "minimax" in model_name or "m2.5" in model_name or "minimax" in provider_name
+
+    def _paper_summary_system_prompt(self) -> str:
+        if self.prompt_library:
+            return self.prompt_library.paper_summary_system()
+        return "你是一个严谨的中文论文分析助手。请根据提供的标题、摘要、全文节选和相关性标签，输出简洁、具体、避免空话的 JSON。"
+
+    def _topic_digest_system_prompt(self) -> str:
+        if self.prompt_library:
+            return self.prompt_library.topic_digest_system()
+        return "你是一个严谨的中文研究情报分析助手。请根据一个主题下的多篇论文信息，生成简洁的中文主题摘要，突出趋势、代表工作和建议关注点。"
 
     def _compose_summary(self, parsed: dict[str, Any]) -> str:
         parts: list[str] = []

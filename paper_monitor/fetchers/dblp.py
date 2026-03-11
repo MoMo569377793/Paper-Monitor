@@ -6,9 +6,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
-from paper_monitor.models import GenericSourceConfig, PaperCandidate, TopicConfig
+from paper_monitor.models import FetchPlan, GenericSourceConfig, PaperCandidate, TopicConfig
 from paper_monitor.utils import normalize_whitespace
 
 
@@ -20,19 +20,62 @@ class DBLPFetcher:
         self.config = config
         self.enabled = config.enabled
 
-    def fetch(self, topic: TopicConfig, queries: list[str]) -> list[PaperCandidate]:
+    def fetch(
+        self,
+        topic: TopicConfig,
+        queries: list[str],
+        plan: FetchPlan | None = None,
+        progress: Callable[[str, bool], None] | None = None,
+    ) -> list[PaperCandidate]:
         if not self.enabled:
             return []
+        plan = plan or FetchPlan(recent_limit=self.config.max_results, page_size=self.config.max_results)
         candidates: list[PaperCandidate] = []
-        for query in queries:
-            params = urllib.parse.urlencode({"q": query, "h": self.config.max_results, "f": 0, "format": "json"})
+        for index, query in enumerate(queries, start=1):
+            if progress:
+                progress(f"DBLP {topic.id} 查询 {index}/{len(queries)}", True)
+            query_items = self._fetch_query(query, plan)
+            candidates.extend(query_items)
+            if progress:
+                progress(f"DBLP {topic.id} 查询 {index}/{len(queries)} 命中 {len(query_items)}", False)
+        candidates = self._apply_plan(candidates, plan)
+        LOGGER.info("dblp topic=%s fetched=%s", topic.id, len(candidates))
+        return candidates
+
+    def _fetch_query(self, query: str, plan: FetchPlan) -> list[PaperCandidate]:
+        page_size = max(1, min(plan.page_size or self.config.max_results, 1000))
+        offset = 0
+        scanned = 0
+        scan_cap = max(plan.recent_limit or 0, self.config.max_results, page_size)
+        if plan.start_year is not None:
+            scan_cap = max(scan_cap, 300)
+
+        items: list[PaperCandidate] = []
+        while scanned < scan_cap:
+            request_size = min(page_size, scan_cap - scanned)
+            params = urllib.parse.urlencode({"q": query, "h": request_size, "f": offset, "format": "json"})
             url = f"https://dblp.org/search/publ/api?{params}"
             payload = self._fetch_with_retry(url, query)
             if not payload:
-                continue
-            candidates.extend(self._parse_json(payload, query))
-        LOGGER.info("dblp topic=%s fetched=%s", topic.id, len(candidates))
-        return candidates
+                break
+            batch = self._parse_json(payload, query)
+            if not batch:
+                break
+            items.extend(batch)
+            scanned += len(batch)
+            offset += len(batch)
+            if len(batch) < request_size:
+                break
+        return items
+
+    def _apply_plan(self, candidates: list[PaperCandidate], plan: FetchPlan) -> list[PaperCandidate]:
+        filtered = candidates
+        if plan.start_year is not None:
+            filtered = [item for item in filtered if item.year is not None and item.year >= plan.start_year]
+        filtered.sort(key=lambda item: (item.year or 0, item.title), reverse=True)
+        if plan.recent_limit:
+            filtered = filtered[: plan.recent_limit]
+        return filtered
 
     def _fetch_with_retry(self, url: str, query: str) -> str | None:
         for attempt in range(3):

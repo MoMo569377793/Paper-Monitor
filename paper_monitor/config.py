@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 
 from paper_monitor.models import (
+    BootstrapConfig,
     EnrichmentConfig,
     GenericSourceConfig,
     LLMConfig,
+    PromptPaths,
     ReportConfig,
     ScholarAlertsConfig,
     Settings,
@@ -21,6 +23,11 @@ DEFAULT_CONFIG = {
     "export_dir": "exports",
     "poll_minutes": 60,
     "timezone": "Asia/Shanghai",
+    "bootstrap": {
+        "start_year": None,
+        "recent_limit": None,
+        "page_size": 25,
+    },
     "sources": {
         "arxiv": {
             "enabled": True,
@@ -62,7 +69,15 @@ DEFAULT_CONFIG = {
         "excerpt_chars": 12000,
         "process_classifications": ["relevant", "maybe"],
     },
+    "prompts": {
+        "paper_summary_system": "prompts/paper_summary_system.txt",
+        "paper_summary_user": "prompts/paper_summary_user.txt",
+        "topic_digest_system": "prompts/topic_digest_system.txt",
+        "topic_digest_user": "prompts/topic_digest_user.txt",
+    },
     "llm": {
+        "variant_id": "primary",
+        "label": "主模型",
         "enabled": False,
         "provider": "openai_compatible",
         "base_url": "",
@@ -76,6 +91,7 @@ DEFAULT_CONFIG = {
         "enable_topic_digest": False,
         "topic_digest_entry_limit": 8,
     },
+    "llm_variants": [],
     "topics": [
         {
             "id": "matrix_free_fem",
@@ -197,11 +213,50 @@ def _load_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def _slugify(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip("-") or "variant"
+
+
+def _build_llm_config(raw: dict, *, config_stem: str, index: int, primary: bool) -> LLMConfig:
+    model = str(raw.get("model", "")).strip()
+    base_variant = str(raw.get("variant_id", "")).strip()
+    if not base_variant:
+        suffix = model or ("primary" if primary else f"variant-{index}")
+        base_variant = f"{config_stem}-{_slugify(suffix)}"
+    label = str(raw.get("label", "")).strip() or model or base_variant
+    return LLMConfig(
+        variant_id=base_variant,
+        label=label,
+        enabled=bool(raw.get("enabled", False)),
+        provider=str(raw.get("provider", "openai_compatible")),
+        base_url=str(raw.get("base_url", "")),
+        api_key_env=str(raw.get("api_key_env", "LLM_API_KEY")),
+        model=model,
+        timeout_seconds=int(raw.get("timeout_seconds", 60)),
+        temperature=float(raw.get("temperature", 0.2)),
+        max_input_chars=int(raw.get("max_input_chars", 16000)),
+        max_output_tokens=int(raw.get("max_output_tokens", 700)),
+        store=bool(raw.get("store", False)),
+        enable_topic_digest=bool(raw.get("enable_topic_digest", False)),
+        topic_digest_entry_limit=int(raw.get("topic_digest_entry_limit", 8)),
+    )
+
+
 def load_settings(config_path: str | Path) -> Settings:
     path = Path(config_path).resolve()
     raw = _load_json(path)
     base_dir = _resolve_base_dir(path)
+    config_stem = path.stem
 
+    bootstrap_raw = raw.get("bootstrap", {})
+    bootstrap = BootstrapConfig(
+        start_year=bootstrap_raw.get("start_year"),
+        recent_limit=bootstrap_raw.get("recent_limit"),
+        page_size=int(bootstrap_raw.get("page_size", 25)),
+    )
     sources = raw.get("sources", {})
     arxiv = GenericSourceConfig(**sources.get("arxiv", {}))
     dblp = GenericSourceConfig(**sources.get("dblp", {}))
@@ -219,7 +274,18 @@ def load_settings(config_path: str | Path) -> Settings:
         excerpt_chars=int(enrichment_raw.get("excerpt_chars", 12000)),
         process_classifications=list(enrichment_raw.get("process_classifications", ["relevant", "maybe"])),
     )
-    llm = LLMConfig(**raw.get("llm", {}))
+    prompts_raw = raw.get("prompts", {})
+    prompt_paths = PromptPaths(
+        paper_summary_system=(base_dir / prompts_raw.get("paper_summary_system", "prompts/paper_summary_system.txt")).resolve(),
+        paper_summary_user=(base_dir / prompts_raw.get("paper_summary_user", "prompts/paper_summary_user.txt")).resolve(),
+        topic_digest_system=(base_dir / prompts_raw.get("topic_digest_system", "prompts/topic_digest_system.txt")).resolve(),
+        topic_digest_user=(base_dir / prompts_raw.get("topic_digest_user", "prompts/topic_digest_user.txt")).resolve(),
+    )
+    llm = _build_llm_config(raw.get("llm", {}), config_stem=config_stem, index=0, primary=True)
+    llm_variants = [
+        _build_llm_config(item, config_stem=config_stem, index=index, primary=False)
+        for index, item in enumerate(raw.get("llm_variants", []), start=1)
+    ]
 
     topics = [TopicConfig(**topic_raw) for topic_raw in raw.get("topics", [])]
     if not topics:
@@ -233,12 +299,15 @@ def load_settings(config_path: str | Path) -> Settings:
         export_dir=(base_dir / raw.get("export_dir", "exports")).resolve(),
         poll_minutes=int(raw.get("poll_minutes", 60)),
         timezone=raw.get("timezone", "Asia/Shanghai"),
+        bootstrap=bootstrap,
         arxiv=arxiv,
         dblp=dblp,
         scholar_alerts=scholar_alerts,
         report=report,
         enrichment=enrichment,
+        prompt_paths=prompt_paths,
         llm=llm,
+        llm_variants=llm_variants,
         topics=topics,
     )
 

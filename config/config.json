@@ -4,6 +4,11 @@
   "export_dir": "exports",
   "poll_minutes": 60,
   "timezone": "Asia/Shanghai",
+  "bootstrap": {
+    "start_year": null,
+    "recent_limit": null,
+    "page_size": 25
+  },
   "sources": {
     "arxiv": {
       "enabled": true,
@@ -48,12 +53,20 @@
       "maybe"
     ]
   },
+  "prompts": {
+    "paper_summary_system": "prompts/paper_summary_system.txt",
+    "paper_summary_user": "prompts/paper_summary_user.txt",
+    "topic_digest_system": "prompts/topic_digest_system.txt",
+    "topic_digest_user": "prompts/topic_digest_user.txt"
+  },
   "llm": {
+    "variant_id": "config-deepseek-chat",
+    "label": "deepseek-chat",
     "enabled": true,
     "provider": "openai_compatible",
     "base_url": "https://ai.saurlax.com/v1",
-    "api_key_env": "LLM_API_KEY",
-    "model": "gpt-5",
+    "api_key_env": "SAURLAX_API_KEY",
+    "model": "deepseek-chat",
     "timeout_seconds": 60,
     "temperature": 0.2,
     "max_input_chars": 16000,
@@ -62,6 +75,7 @@
     "enable_topic_digest": true,
     "topic_digest_entry_limit": 8
   },
+  "llm_variants": [],
   "topics": [
     {
       "id": "matrix_free_fem",
@@ -71,17 +85,27 @@
         "arxiv": [
           "all:\"matrix-free\" AND all:\"finite element\"",
           "all:\"partial assembly\" AND all:\"finite element\"",
-          "all:\"sum factorization\" AND all:\"finite element\""
+          "all:\"sum factorization\" AND all:\"finite element\"",
+          "all:\"matrix-free\" AND all:\"multigrid\"",
+          "all:\"matrix-free\" AND all:\"preconditioner\"",
+          "all:\"matrix-free\" AND all:\"high-order finite element\"",
+          "all:\"libCEED\" AND all:\"matrix-free\""
         ],
         "dblp": [
           "\"matrix-free\" \"finite element\"",
           "\"partial assembly\" \"finite element\"",
-          "\"sum factorization\" \"finite element\""
+          "\"sum factorization\" \"finite element\"",
+          "\"matrix-free\" multigrid",
+          "\"matrix-free\" preconditioner",
+          "\"matrix-free\" \"high-order finite element\"",
+          "libCEED matrix-free"
         ],
         "google_scholar_alerts": [
           "\"matrix-free\" \"finite element\"",
           "\"partial assembly\" FEM",
-          "\"sum factorization\" finite element"
+          "\"sum factorization\" finite element",
+          "\"matrix-free\" multigrid finite element",
+          "\"matrix-free\" preconditioner finite element"
         ]
       },
       "must_match_groups": [
@@ -96,7 +120,11 @@
           "finite elements",
           "fem",
           "high-order fem",
-          "high order finite element"
+          "high order finite element",
+          "galerkin",
+          "discontinuous galerkin",
+          "dg",
+          "spectral element"
         ]
       ],
       "positive_keywords": [

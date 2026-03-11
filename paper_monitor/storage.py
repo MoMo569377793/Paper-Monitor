@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from paper_monitor.models import PaperCandidate, PaperRecord, ReportEntry, TopicEvaluation
+from paper_monitor.models import PaperCandidate, PaperLLMSummary, PaperRecord, ReportEntry, TopicEvaluation
 from paper_monitor.utils import (
     choose_earlier_date,
     choose_later_date,
@@ -107,6 +107,28 @@ CREATE TABLE IF NOT EXISTS reports (
     created_at TEXT NOT NULL,
     UNIQUE(report_type, report_date)
 );
+
+CREATE TABLE IF NOT EXISTS paper_llm_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL,
+    variant_id TEXT NOT NULL,
+    variant_label TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    base_url TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    summary_text TEXT NOT NULL DEFAULT '',
+    summary_basis TEXT NOT NULL DEFAULT '',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    structured_json TEXT NOT NULL DEFAULT '{}',
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(paper_id) REFERENCES papers(id) ON DELETE CASCADE,
+    UNIQUE(paper_id, variant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_llm_summaries_paper
+ON paper_llm_summaries(paper_id);
 """
 
 PAPER_COLUMN_MIGRATIONS = {
@@ -397,6 +419,102 @@ class Database:
         )
         self.connection.commit()
 
+    def upsert_paper_llm_summary(
+        self,
+        paper_id: int,
+        *,
+        variant_id: str,
+        variant_label: str,
+        provider: str,
+        base_url: str,
+        model: str,
+        summary_text: str,
+        summary_basis: str,
+        tags: list[str],
+        structured: dict[str, Any],
+        usage: dict[str, Any],
+    ) -> None:
+        now = now_iso(self.timezone_name)
+        self.connection.execute(
+            """
+            INSERT INTO paper_llm_summaries (
+                paper_id, variant_id, variant_label, provider, base_url, model,
+                summary_text, summary_basis, tags_json, structured_json, usage_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(paper_id, variant_id)
+            DO UPDATE SET
+                variant_label = excluded.variant_label,
+                provider = excluded.provider,
+                base_url = excluded.base_url,
+                model = excluded.model,
+                summary_text = excluded.summary_text,
+                summary_basis = excluded.summary_basis,
+                tags_json = excluded.tags_json,
+                structured_json = excluded.structured_json,
+                usage_json = excluded.usage_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                paper_id,
+                variant_id,
+                variant_label,
+                provider,
+                base_url,
+                model,
+                summary_text,
+                summary_basis,
+                json_dumps(unique_strings(tags)),
+                json_dumps(structured),
+                json_dumps(usage),
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+
+    def fetch_paper_llm_summaries(self, paper_ids: list[int] | None = None) -> dict[int, list[PaperLLMSummary]]:
+        params: list[Any] = []
+        sql = """
+            SELECT paper_id, variant_id, variant_label, provider, base_url, model,
+                   summary_text, summary_basis, tags_json, structured_json, usage_json,
+                   created_at, updated_at
+            FROM paper_llm_summaries
+        """
+        if paper_ids:
+            placeholders = ", ".join(["?"] * len(paper_ids))
+            sql += f" WHERE paper_id IN ({placeholders})"
+            params.extend(paper_ids)
+        sql += " ORDER BY variant_label ASC, model ASC, id ASC"
+        rows = self.connection.execute(sql, params).fetchall()
+        grouped: dict[int, list[PaperLLMSummary]] = {}
+        for row in rows:
+            grouped.setdefault(int(row["paper_id"]), []).append(
+                PaperLLMSummary(
+                    paper_id=int(row["paper_id"]),
+                    variant_id=row["variant_id"],
+                    variant_label=row["variant_label"],
+                    provider=row["provider"] or "",
+                    base_url=row["base_url"] or "",
+                    model=row["model"] or "",
+                    summary_text=row["summary_text"] or "",
+                    summary_basis=row["summary_basis"] or "",
+                    tags=safe_json_loads(row["tags_json"], []),
+                    structured=safe_json_loads(row["structured_json"], {}),
+                    usage=safe_json_loads(row["usage_json"], {}),
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+            )
+        return grouped
+
+    def fetch_paper_llm_variant_ids(self, paper_id: int) -> set[str]:
+        rows = self.connection.execute(
+            "SELECT variant_id FROM paper_llm_summaries WHERE paper_id = ?",
+            (paper_id,),
+        ).fetchall()
+        return {row["variant_id"] for row in rows}
+
     def upsert_match(self, paper_id: int, evaluation: TopicEvaluation) -> bool:
         now = now_iso(self.timezone_name)
         existing = self.connection.execute(
@@ -486,13 +604,18 @@ class Database:
 
         rows = self.connection.execute(
             f"""
-            SELECT p.*, MAX(m.score) AS best_score
+            SELECT p.*, MAX(m.score) AS best_score, MIN(COALESCE(pls.variant_count, 0)) AS variant_count
             FROM papers p
             JOIN matches m ON m.paper_id = p.id
+            LEFT JOIN (
+                SELECT paper_id, COUNT(DISTINCT variant_id) AS variant_count
+                FROM paper_llm_summaries
+                GROUP BY paper_id
+            ) pls ON pls.paper_id = p.id
             WHERE m.classification IN ({placeholders})
             {topic_filter}
             GROUP BY p.id
-            ORDER BY best_score DESC, p.created_at DESC, p.id DESC
+            ORDER BY variant_count ASC, best_score DESC, p.created_at DESC, p.id DESC
             LIMIT ?
             """,
             params,

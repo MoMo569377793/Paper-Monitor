@@ -6,7 +6,10 @@ reports/daily/*.md
 reports/daily/*.html
 reports/weekly/*.md
 reports/weekly/*.html
+reports/papers/*.md
+reports/papers/*.html
 exports/*.json
+exports/papers/*.json
 artifacts/pdfs/*
 artifacts/text/*
 *.env

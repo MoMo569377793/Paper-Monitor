@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -28,6 +29,9 @@ ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_LLM_USER_AGENT = "paper-monitor/0.1 (+local)"
 THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
+PDF_STRATEGY_RESPONSES = "responses_input_file"
+PDF_STRATEGY_CHAT_FILE = "chat_file"
+PDF_STRATEGY_CHAT_INPUT_FILE = "chat_input_file"
 
 
 class LLMClient:
@@ -36,6 +40,8 @@ class LLMClient:
         self.provider = config.provider.strip().lower()
         self.prompt_library = prompt_library
         self.api_key = self._resolve_api_key()
+        self._pdf_input_strategy: str | None = None
+        self._pdf_probe_attempted = False
         requires_auth = "api.openai.com" in config.base_url or self.provider in {"openai_responses", "openai", "responses"}
         self.enabled = bool(config.enabled and config.base_url and config.model and (self.api_key or not requires_auth))
         if config.enabled and requires_auth and not self.api_key:
@@ -50,9 +56,15 @@ class LLMClient:
 
         parsed = None
         usage: dict[str, Any] = {}
+        fulltext = ""
+        pdf_path = self._resolve_local_pdf_path(paper)
+        pdf_strategy = self._ensure_pdf_input_strategy(pdf_path)
+        if pdf_path and pdf_strategy:
+            parsed, usage = self._generate_summary_from_pdf(paper, evaluations, pdf_path, pdf_strategy)
         fulltext = self._load_fulltext_text(paper)
         if fulltext:
-            parsed, usage = self._generate_summary_from_fulltext(paper, evaluations, fulltext)
+            if not parsed:
+                parsed, usage = self._generate_summary_from_fulltext(paper, evaluations, fulltext)
         if not parsed:
             prefer_compact = self._prefers_compact_mode()
             if prefer_compact:
@@ -90,7 +102,11 @@ class LLMClient:
         parsed["usage"] = usage
         tags = unique_strings(parsed.get("tags", []))
         summary_text = self._compose_summary(parsed)
-        basis = self._normalize_basis(parsed.get("basis"), has_fulltext=bool(fulltext or paper.fulltext_excerpt))
+        basis = self._normalize_basis(
+            parsed.get("basis"),
+            source_mode=str(parsed.get("source_mode", "")).strip().lower(),
+            has_fulltext=bool(fulltext or paper.fulltext_excerpt),
+        )
         return LLMResult(
             summary_text=summary_text,
             summary_basis=basis,
@@ -222,6 +238,55 @@ class LLMClient:
             return None, usage
         return THINK_TAG_RE.sub("", str(content)).strip() or None, usage
 
+    def _request_structured_json_with_pdf(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        pdf_path: Path,
+        pdf_strategy: str,
+        max_output_tokens: int | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        data_url = self._build_pdf_data_url(pdf_path)
+        if not data_url:
+            return None, {}
+        if pdf_strategy == PDF_STRATEGY_RESPONSES:
+            content, usage = self._post_responses_with_pdf(
+                system_prompt,
+                user_prompt,
+                schema_name,
+                schema,
+                pdf_filename=pdf_path.name,
+                pdf_data_url=data_url,
+                max_output_tokens=max_output_tokens,
+            )
+        elif pdf_strategy in {PDF_STRATEGY_CHAT_FILE, PDF_STRATEGY_CHAT_INPUT_FILE}:
+            content, usage = self._post_chat_completions_with_pdf(
+                system_prompt,
+                user_prompt,
+                schema_name,
+                schema,
+                pdf_filename=pdf_path.name,
+                pdf_data_url=data_url,
+                file_item_type="file" if pdf_strategy == PDF_STRATEGY_CHAT_FILE else "input_file",
+                max_output_tokens=max_output_tokens,
+            )
+        else:
+            return None, {}
+        if not content:
+            return None, usage
+        parsed = self._parse_response_json(content)
+        if parsed is None:
+            repaired, repair_usage = self._repair_response_json(content, schema_name, schema)
+            if repaired is not None:
+                return repaired, self._merge_usage_items([usage, repair_usage])
+            return None, self._merge_usage_items([usage])
+        if isinstance(parsed, dict) and isinstance(parsed.get(schema_name), dict):
+            return parsed.get(schema_name), usage
+        return parsed, usage
+
     def _repair_response_json(
         self,
         content: str,
@@ -296,6 +361,65 @@ class LLMClient:
             content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
         return str(content), self._parse_usage(data)
 
+    def _post_chat_completions_with_pdf(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        *,
+        pdf_filename: str,
+        pdf_data_url: str,
+        file_item_type: str,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        prompt_with_schema = (
+            f"{user_prompt}\n\n"
+            f"请只输出严格合法的 JSON，对象名为 {schema_name}，遵守以下 JSON Schema:\n"
+            f"{json.dumps(schema, ensure_ascii=False)}"
+        )
+        file_item: dict[str, Any]
+        if file_item_type == "input_file":
+            file_item = {
+                "type": "input_file",
+                "filename": pdf_filename,
+                "file_data": pdf_data_url,
+            }
+        else:
+            file_item = {
+                "type": "file",
+                "file": {
+                    "filename": pdf_filename,
+                    "file_data": pdf_data_url,
+                },
+            }
+        payload = {
+            "model": self.config.model,
+            "temperature": self.config.temperature,
+            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_with_schema},
+                        file_item,
+                    ],
+                },
+            ],
+        }
+        data = self._post_json(self.config.base_url.rstrip("/") + "/chat/completions", payload, warn_on_error=False)
+        if not data:
+            return None, {}
+        choices = data.get("choices", [])
+        if not choices:
+            return None, self._parse_usage(data)
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+        return str(content), self._parse_usage(data)
+
     def _post_chat_completions_text(
         self,
         system_prompt: str,
@@ -354,6 +478,50 @@ class LLMClient:
             return None, {}
         return self._extract_responses_text(data), self._parse_usage(data)
 
+    def _post_responses_with_pdf(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        *,
+        pdf_filename: str,
+        pdf_data_url: str,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        payload = {
+            "model": self.config.model,
+            "instructions": system_prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_prompt},
+                        {
+                            "type": "input_file",
+                            "filename": pdf_filename,
+                            "file_data": pdf_data_url,
+                        },
+                    ],
+                }
+            ],
+            "temperature": self.config.temperature,
+            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "store": self.config.store,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+        }
+        data = self._post_json(self.config.base_url.rstrip("/") + "/responses", payload, warn_on_error=False)
+        if not data:
+            return None, {}
+        return self._extract_responses_text(data), self._parse_usage(data)
+
     def _post_responses_text(
         self,
         system_prompt: str,
@@ -374,7 +542,13 @@ class LLMClient:
             return None, {}
         return self._extract_responses_text(data), self._parse_usage(data)
 
-    def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def _post_json(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        warn_on_error: bool = True,
+    ) -> dict[str, Any] | None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -396,21 +570,24 @@ class LLMClient:
                 if exc.code in RETRYABLE_STATUS_CODES and attempt < 2:
                     time.sleep(1 + attempt)
                     continue
-                LOGGER.warning(
-                    "llm request failed: status=%s, body=%s",
-                    exc.code,
-                    shorten(error_body or str(exc), 320),
-                )
+                if warn_on_error:
+                    LOGGER.warning(
+                        "llm request failed: status=%s, body=%s",
+                        exc.code,
+                        shorten(error_body or str(exc), 320),
+                    )
                 return None
             except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
                 last_error = exc
                 if attempt < 2:
                     time.sleep(1 + attempt)
                     continue
-                LOGGER.warning("llm request failed: %s", exc)
+                if warn_on_error:
+                    LOGGER.warning("llm request failed: %s", exc)
                 return None
         else:
-            LOGGER.warning("llm request failed after retries: %s", last_error or "unknown error")
+            if warn_on_error:
+                LOGGER.warning("llm request failed after retries: %s", last_error or "unknown error")
             return None
 
         try:
@@ -547,6 +724,65 @@ class LLMClient:
         parsed["source_mode"] = "fulltext_txt"
         return parsed, self._merge_usage_items(usage_items)
 
+    def _generate_summary_from_pdf(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        pdf_path: Path,
+        pdf_strategy: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        prefer_compact = self._prefers_compact_mode()
+        parsed = None
+        usage_items: list[dict[str, Any]] = []
+        if prefer_compact:
+            parsed, usage = self._request_structured_json_with_pdf(
+                system_prompt=(
+                    self._paper_summary_system_prompt()
+                    + " 你会同时收到论文完整 PDF 文件。请阅读全文，不要输出思考过程，只输出最终 JSON。"
+                ),
+                user_prompt=self._build_pdf_paper_prompt(paper, evaluations, compact=True),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+                pdf_path=pdf_path,
+                pdf_strategy=pdf_strategy,
+                max_output_tokens=max(self.config.max_output_tokens, 1200),
+            )
+            usage_items.append(usage)
+        if not parsed:
+            parsed, usage = self._request_structured_json_with_pdf(
+                system_prompt=(
+                    self._paper_summary_system_prompt()
+                    + " 你会同时收到论文完整 PDF 文件。请阅读全文，不要只依赖摘要。"
+                ),
+                user_prompt=self._build_pdf_paper_prompt(paper, evaluations, compact=False),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+                pdf_path=pdf_path,
+                pdf_strategy=pdf_strategy,
+                max_output_tokens=max(self.config.max_output_tokens, 1400),
+            )
+            usage_items.append(usage)
+        if not parsed and not prefer_compact:
+            parsed, usage = self._request_structured_json_with_pdf(
+                system_prompt=(
+                    self._paper_summary_system_prompt()
+                    + " 你会同时收到论文完整 PDF 文件。请阅读全文，不要输出思考过程，只输出最终 JSON。"
+                ),
+                user_prompt=self._build_pdf_paper_prompt(paper, evaluations, compact=True),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+                pdf_path=pdf_path,
+                pdf_strategy=pdf_strategy,
+                max_output_tokens=max(self.config.max_output_tokens, 1200),
+            )
+            usage_items.append(usage)
+        if not parsed:
+            return None, self._merge_usage_items(usage_items)
+        parsed["source_mode"] = "pdf_direct"
+        parsed["pdf_input_used"] = True
+        parsed["pdf_filename"] = pdf_path.name
+        return parsed, self._merge_usage_items(usage_items)
+
     def _load_fulltext_text(self, paper: PaperRecord) -> str:
         path_text = (paper.fulltext_txt_path or "").strip()
         if not path_text:
@@ -557,6 +793,91 @@ class LLMClient:
             LOGGER.warning("failed to read fulltext for paper_id=%s: %s", paper.id, exc)
             return ""
         return fulltext.strip()
+
+    def _resolve_local_pdf_path(self, paper: PaperRecord) -> Path | None:
+        path_text = (paper.pdf_local_path or "").strip()
+        if not path_text:
+            return None
+        path = Path(path_text)
+        if not path.exists() or not path.is_file():
+            return None
+        return path
+
+    def _build_pdf_data_url(self, pdf_path: Path) -> str | None:
+        try:
+            pdf_bytes = pdf_path.read_bytes()
+        except OSError as exc:
+            LOGGER.warning("failed to read pdf for direct upload %s: %s", pdf_path, exc)
+            return None
+        if not pdf_bytes:
+            return None
+        if len(pdf_bytes) > self.config.pdf_inline_max_bytes:
+            LOGGER.info(
+                "pdf direct input skipped for %s because file is too large (%s bytes > %s bytes)",
+                pdf_path.name,
+                len(pdf_bytes),
+                self.config.pdf_inline_max_bytes,
+            )
+            return None
+        encoded = base64.b64encode(pdf_bytes).decode("ascii")
+        return f"data:application/pdf;base64,{encoded}"
+
+    def _ensure_pdf_input_strategy(self, pdf_path: Path | None) -> str | None:
+        mode = self.config.pdf_input_mode.strip().lower()
+        if mode == "disable":
+            return None
+        if self._pdf_input_strategy:
+            return self._pdf_input_strategy
+        if self._pdf_probe_attempted and mode != "force":
+            return None
+        strategy_candidates = self._candidate_pdf_strategies()
+        if not strategy_candidates:
+            self._pdf_probe_attempted = True
+            return None
+        if mode == "force":
+            self._pdf_input_strategy = strategy_candidates[0]
+            self._pdf_probe_attempted = True
+            return self._pdf_input_strategy
+        if pdf_path is None:
+            return None
+        self._pdf_probe_attempted = True
+        for strategy in strategy_candidates:
+            parsed, _ = self._request_structured_json_with_pdf(
+                system_prompt=(
+                    "你是一个能力探测助手。"
+                    "如果你能读取附带的 PDF 文件，请返回 {\"supported\": true}。"
+                    "不要输出其他字段。"
+                ),
+                user_prompt="请判断你是否能读取随附 PDF 文件内容，并返回 supported=true。",
+                schema_name="pdf_probe",
+                schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"supported": {"type": "boolean"}},
+                    "required": ["supported"],
+                },
+                pdf_path=pdf_path,
+                pdf_strategy=strategy,
+                max_output_tokens=120,
+            )
+            if parsed and bool(parsed.get("supported")):
+                self._pdf_input_strategy = strategy
+                LOGGER.info(
+                    "llm pdf input enabled for %s via %s",
+                    self.config.label or self.config.model or self.config.variant_id,
+                    strategy,
+                )
+                return strategy
+        LOGGER.info(
+            "llm pdf input unavailable for %s, fallback to extracted text",
+            self.config.label or self.config.model or self.config.variant_id,
+        )
+        return None
+
+    def _candidate_pdf_strategies(self) -> list[str]:
+        if self.provider in {"openai_responses", "openai", "responses"}:
+            return [PDF_STRATEGY_RESPONSES]
+        return [PDF_STRATEGY_CHAT_FILE, PDF_STRATEGY_CHAT_INPUT_FILE]
 
     def _chunk_fulltext(self, fulltext: str) -> list[str]:
         text = fulltext.strip()
@@ -670,6 +991,40 @@ class LLMClient:
             f"相关主题:\n{context['topics_text']}\n\n"
             f"摘要:\n{context['abstract']}\n\n"
             f"全文节选:\n{context['fulltext']}\n"
+        )
+
+    def _build_pdf_paper_prompt(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        *,
+        compact: bool,
+    ) -> str:
+        topics_text = self._topics_text(evaluations)
+        abstract = shorten(paper.abstract or "", min(self.config.max_input_chars, 2500 if compact else 4500)) or "无"
+        context = {
+            "title": paper.title,
+            "authors": ", ".join(paper.authors[:8]) or "未知",
+            "venue": paper.venue or "未知",
+            "published_at": paper.published_at or "未知",
+            "topics_text": topics_text or "- 无",
+            "abstract": abstract,
+            "fulltext": (
+                "本次请求已直接附带完整 PDF 文件。"
+                "请以阅读全文后的内容为准，明确写出问题、方法、应用、结果、贡献和局限。"
+            ),
+        }
+        if self.prompt_library:
+            return self.prompt_library.paper_summary_user(context)
+        instruction = "请直接阅读随附 PDF 全文并总结，不要只依赖摘要。"
+        return (
+            f"{instruction}\n\n"
+            f"标题: {context['title']}\n"
+            f"作者: {context['authors']}\n"
+            f"发表信息: venue={context['venue']}, published_at={context['published_at']}\n"
+            f"相关主题:\n{context['topics_text']}\n\n"
+            f"摘要:\n{context['abstract']}\n\n"
+            f"全文说明:\n{context['fulltext']}\n"
         )
 
     def _build_paper_chunk_prompt(
@@ -843,11 +1198,13 @@ class LLMClient:
             parts.append(f"局限：{'；'.join(limitations[:2])}")
         return " ".join(parts) if parts else "LLM 未返回可用总结。"
 
-    def _normalize_basis(self, basis: Any, *, has_fulltext: bool) -> str:
+    def _normalize_basis(self, basis: Any, *, source_mode: str, has_fulltext: bool) -> str:
         value = str(basis or "").strip().lower()
-        allowed = {"llm+fulltext+metadata", "llm+abstract+metadata"}
+        allowed = {"llm+pdf+metadata", "llm+fulltext+metadata", "llm+abstract+metadata"}
         if value in allowed:
             return value
+        if source_mode == "pdf_direct":
+            return "llm+pdf+metadata"
         return "llm+fulltext+metadata" if has_fulltext else "llm+abstract+metadata"
 
     def _paper_summary_schema(self) -> dict[str, Any]:
@@ -863,7 +1220,10 @@ class LLMClient:
                 "contributions": {"type": "array", "items": {"type": "string"}},
                 "limitations": {"type": "array", "items": {"type": "string"}},
                 "tags": {"type": "array", "items": {"type": "string"}},
-                "basis": {"type": "string", "enum": ["llm+fulltext+metadata", "llm+abstract+metadata"]},
+                "basis": {
+                    "type": "string",
+                    "enum": ["llm+pdf+metadata", "llm+fulltext+metadata", "llm+abstract+metadata"],
+                },
             },
             "required": [
                 "summary",

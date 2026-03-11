@@ -79,6 +79,8 @@ class LLMConfig:
     fulltext_chunk_chars: int = 10000
     fulltext_chunk_overlap_chars: int = 1200
     fulltext_max_chunks: int = 12
+    pdf_input_mode: str = "auto"
+    pdf_inline_max_bytes: int = 12582912
 
 
 @dataclass(slots=True)

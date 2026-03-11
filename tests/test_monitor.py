@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from paper_monitor.llm import LLMClient
 from paper_monitor.models import FetchPlan, LLMResult
 from paper_monitor.models import PaperCandidate, PaperRecord, RunStats
 from paper_monitor.pipeline import MonitorPipeline
-from paper_monitor.reports import generate_comparison_report, generate_report
+from paper_monitor.reports import generate_comparison_report, generate_paper_reports, generate_report
 from paper_monitor.storage import Database
 
 
@@ -600,6 +601,245 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertIn("应用：高阶有限元", result.summary_text)
             self.assertGreaterEqual(int(result.structured.get("chunk_count", 0)), 2)
 
+    def test_llm_summary_prefers_direct_pdf_when_backend_supports_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            settings.llm.enabled = True
+            settings.llm.provider = "openai_compatible"
+            settings.llm.base_url = "https://example.invalid/v1"
+            settings.llm.model = "dummy-model"
+            settings.llm.api_key_env = ""
+            settings.llm.pdf_input_mode = "auto"
+
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n% fake pdf for test\n")
+            fulltext_path = root / "paper.txt"
+            fulltext_path.write_text("fallback fulltext should not be used", encoding="utf-8")
+
+            paper = PaperRecord(
+                id=1,
+                title="Direct PDF Preferred Paper",
+                title_norm="direct pdf preferred paper",
+                abstract="An abstract.",
+                authors=["Alice"],
+                published_at="2026-03-10T09:00:00+08:00",
+                updated_at="2026-03-10T09:00:00+08:00",
+                primary_url="https://example.invalid/paper",
+                pdf_url="https://example.invalid/paper.pdf",
+                doi="",
+                arxiv_id="",
+                venue="arXiv",
+                year=2026,
+                categories=["cs.NA"],
+                summary_text="",
+                summary_basis="metadata-only",
+                tags=[],
+                pdf_local_path=str(pdf_path),
+                pdf_status="downloaded",
+                pdf_downloaded_at="2026-03-10T10:00:00+08:00",
+                fulltext_txt_path=str(fulltext_path),
+                fulltext_excerpt="fallback excerpt",
+                fulltext_status="extracted",
+                page_count=8,
+                llm_summary={},
+                analysis_updated_at=None,
+                source_first="arxiv",
+                created_at="2026-03-10T09:00:00+08:00",
+                last_seen_at="2026-03-10T09:00:00+08:00",
+                metadata={},
+            )
+            evaluations = [
+                type(
+                    "Eval",
+                    (),
+                    {
+                        "classification": "relevant",
+                        "topic_name": "有限元分析 Matrix-Free 算法优化",
+                        "score": 30.0,
+                        "matched_keywords": ["matrix-free", "finite element"],
+                    },
+                )()
+            ]
+
+            class PDFCapableClient(LLMClient):
+                def __init__(self, config):  # noqa: ANN001
+                    super().__init__(config)
+                    self.enabled = True
+                    self.pdf_request_count = 0
+
+                def _post_json(self, url, payload, warn_on_error=True):  # noqa: ANN001, ARG002
+                    messages = payload.get("messages", [])
+                    user_content = messages[1].get("content", []) if len(messages) > 1 else []
+                    if isinstance(user_content, list):
+                        self.pdf_request_count += 1
+                        prompt_text = json.dumps(user_content, ensure_ascii=False)
+                        if "supported" in prompt_text:
+                            return {
+                                "choices": [{"message": {"content": "{\"supported\": true}"}}],
+                                "usage": {"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
+                            }
+                        return {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": json.dumps(
+                                            {
+                                                "summary": "模型直接阅读 PDF 后总结了整篇论文。",
+                                                "problem": "论文关注矩阵自由有限元算子效率。",
+                                                "method": "直接从 PDF 中识别方法与实验。",
+                                                "application": "高阶有限元与 GPU 求解。",
+                                                "results": "实验显示吞吐提升。",
+                                                "contributions": ["直接 PDF 阅读", "保留全文上下文"],
+                                                "limitations": ["依赖后端支持 PDF"],
+                                                "tags": ["matrix-free", "gpu"],
+                                                "basis": "llm+pdf+metadata",
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                    }
+                                }
+                            ],
+                            "usage": {"input_tokens": 120, "output_tokens": 48, "total_tokens": 168},
+                        }
+                    raise AssertionError("this test should not call non-pdf chat requests")
+
+                def _request_text(self, **kwargs):  # noqa: ANN003
+                    raise AssertionError("fulltext fallback should not run when pdf direct is supported")
+
+            client = PDFCapableClient(settings.llm)
+            result = client.generate_summary(paper, evaluations)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.summary_basis, "llm+pdf+metadata")
+            self.assertEqual(result.structured.get("source_mode"), "pdf_direct")
+            self.assertTrue(result.structured.get("pdf_input_used"))
+            self.assertGreaterEqual(client.pdf_request_count, 2)
+
+    def test_llm_summary_falls_back_to_fulltext_when_pdf_direct_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            settings.llm.enabled = True
+            settings.llm.provider = "openai_compatible"
+            settings.llm.base_url = "https://example.invalid/v1"
+            settings.llm.model = "dummy-model"
+            settings.llm.api_key_env = ""
+            settings.llm.fulltext_chunk_chars = 120
+            settings.llm.fulltext_chunk_overlap_chars = 10
+
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n% fake pdf for test\n")
+            fulltext_path = root / "paper.txt"
+            fulltext_path.write_text(
+                "This full text should be used when the backend cannot read PDF directly. " * 10,
+                encoding="utf-8",
+            )
+
+            paper = PaperRecord(
+                id=1,
+                title="Fallback Fulltext Paper",
+                title_norm="fallback fulltext paper",
+                abstract="An abstract.",
+                authors=["Alice"],
+                published_at="2026-03-10T09:00:00+08:00",
+                updated_at="2026-03-10T09:00:00+08:00",
+                primary_url="https://example.invalid/paper",
+                pdf_url="https://example.invalid/paper.pdf",
+                doi="",
+                arxiv_id="",
+                venue="arXiv",
+                year=2026,
+                categories=["cs.NA"],
+                summary_text="",
+                summary_basis="metadata-only",
+                tags=[],
+                pdf_local_path=str(pdf_path),
+                pdf_status="downloaded",
+                pdf_downloaded_at="2026-03-10T10:00:00+08:00",
+                fulltext_txt_path=str(fulltext_path),
+                fulltext_excerpt="fallback excerpt",
+                fulltext_status="extracted",
+                page_count=8,
+                llm_summary={},
+                analysis_updated_at=None,
+                source_first="arxiv",
+                created_at="2026-03-10T09:00:00+08:00",
+                last_seen_at="2026-03-10T09:00:00+08:00",
+                metadata={},
+            )
+            evaluations = [
+                type(
+                    "Eval",
+                    (),
+                    {
+                        "classification": "relevant",
+                        "topic_name": "有限元分析 Matrix-Free 算法优化",
+                        "score": 30.0,
+                        "matched_keywords": ["matrix-free", "finite element"],
+                    },
+                )()
+            ]
+
+            class PDFFallbackClient(LLMClient):
+                def __init__(self, config):  # noqa: ANN001
+                    super().__init__(config)
+                    self.enabled = True
+                    self.pdf_probe_attempts = 0
+                    self.chunk_calls = 0
+
+                def _post_json(self, url, payload, warn_on_error=True):  # noqa: ANN001, ARG002
+                    messages = payload.get("messages", [])
+                    user_content = messages[1].get("content", []) if len(messages) > 1 else []
+                    if isinstance(user_content, list):
+                        self.pdf_probe_attempts += 1
+                        return None
+                    return None
+
+                def _request_text(self, **kwargs):  # noqa: ANN003
+                    self.chunk_calls += 1
+                    return (
+                        "分块概括：该分块来自完整抽取全文。\n"
+                        "关键方法：matrix-free operator。\n"
+                        "结果/证据：吞吐提升。\n"
+                        "应用场景：高阶有限元。\n"
+                        "局限：依赖特定离散。",
+                        {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    )
+
+                def _request_structured_json(self, **kwargs):  # noqa: ANN003
+                    return (
+                        {
+                            "summary": "在 PDF 不可直读时，回退到完整抽取全文并完成总结。",
+                            "problem": "论文关注 matrix-free 效率问题。",
+                            "method": "基于完整抽取全文做分块归纳。",
+                            "application": "高阶有限元。",
+                            "results": "性能提升。",
+                            "contributions": ["回退逻辑生效"],
+                            "limitations": ["依赖文本抽取质量"],
+                            "tags": ["matrix-free"],
+                            "basis": "llm+fulltext+metadata",
+                        },
+                        {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28},
+                    )
+
+            client = PDFFallbackClient(settings.llm)
+            result = client.generate_summary(paper, evaluations)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.summary_basis, "llm+fulltext+metadata")
+            self.assertEqual(result.structured.get("source_mode"), "fulltext_txt")
+            self.assertGreaterEqual(client.pdf_probe_attempts, 1)
+            self.assertGreaterEqual(client.chunk_calls, 1)
+
     def test_enrichment_candidates_prioritize_missing_llm_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -878,6 +1118,79 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertIn("输入依据 已读取完整全文", html)
             self.assertIn("\"summary_scope\": \"已读取完整全文\"", export)
             self.assertIn("\"chunk_count\": 4", export)
+
+            db.close()
+
+    def test_generate_paper_reports_exports_single_paper_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config.example.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            pipeline._process_candidate(
+                PaperCandidate(
+                    source_name="arxiv",
+                    source_paper_id="2761.00001",
+                    query_text="matrix-free finite element",
+                    title="Standalone Paper Report Test",
+                    abstract="We study matrix-free operators and multigrid preconditioners.",
+                    authors=["Alice"],
+                    published_at="2026-03-10T09:00:00+08:00",
+                    updated_at="2026-03-10T09:00:00+08:00",
+                    primary_url="https://arxiv.org/abs/2761.00001",
+                    pdf_url="https://arxiv.org/pdf/2761.00001.pdf",
+                    doi="",
+                    arxiv_id="2761.00001",
+                    venue="arXiv",
+                    year=2026,
+                    categories=["cs.NA"],
+                    raw={"fixture": True},
+                ),
+                RunStats(),
+            )
+            db.upsert_paper_llm_summary(
+                1,
+                variant_id="config-example-gpt-5-4",
+                variant_label="gpt-5.4",
+                provider="openai_responses",
+                base_url="https://example.invalid/v1",
+                model="gpt-5.4",
+                summary_text="这是单篇导出的模型总结。",
+                summary_basis="llm+pdf+metadata",
+                tags=["matrix-free", "multigrid"],
+                structured={
+                    "summary": "这是单篇导出的模型总结。",
+                    "problem": "矩阵自由算子效率。",
+                    "method": "直接读取 PDF。",
+                    "application": "高阶有限元。",
+                    "results": "性能更好。",
+                    "contributions": ["单篇导出"],
+                    "limitations": ["依赖 PDF"],
+                    "tags": ["matrix-free", "multigrid"],
+                    "basis": "llm+pdf+metadata",
+                    "source_mode": "pdf_direct",
+                    "pdf_filename": "2761.00001.pdf",
+                },
+                usage={"input_tokens": 321, "output_tokens": 88, "total_tokens": 409},
+            )
+
+            outputs = generate_paper_reports(db, settings, [1])
+            paper_paths = outputs[1]
+            markdown = Path(paper_paths["markdown"]).read_text(encoding="utf-8")
+            html = Path(paper_paths["html"]).read_text(encoding="utf-8")
+            export = Path(paper_paths["json"]).read_text(encoding="utf-8")
+
+            self.assertIn("单篇论文总结 - Standalone Paper Report Test", markdown)
+            self.assertIn("输入依据：`已直接读取 PDF`", markdown)
+            self.assertIn("这是单篇导出的模型总结。", markdown)
+            self.assertIn("已直接读取 PDF", html)
+            self.assertIn("\"summary_scope\": \"已直接读取 PDF\"", export)
 
             db.close()
 

@@ -618,6 +618,27 @@ class Database:
             for row in rows
         ]
 
+    def fetch_paper_sources(self, paper_id: int) -> tuple[list[str], list[str]]:
+        rows = self.connection.execute(
+            """
+            SELECT source_name, source_url
+            FROM paper_sources
+            WHERE paper_id = ?
+            ORDER BY source_name ASC, id ASC
+            """,
+            (paper_id,),
+        ).fetchall()
+        source_names: list[str] = []
+        source_urls: list[str] = []
+        for row in rows:
+            source_name = str(row["source_name"] or "").strip()
+            source_url = str(row["source_url"] or "").strip()
+            if source_name:
+                source_names.append(source_name)
+            if source_url:
+                source_urls.append(source_url)
+        return source_names, source_urls
+
     def fetch_enrichment_candidates(
         self,
         limit: int,

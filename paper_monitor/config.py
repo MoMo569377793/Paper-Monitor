@@ -97,6 +97,8 @@ DEFAULT_CONFIG = {
         "fulltext_chunk_chars": 10000,
         "fulltext_chunk_overlap_chars": 1200,
         "fulltext_max_chunks": 12,
+        "pdf_input_mode": "auto",
+        "pdf_inline_max_bytes": 12582912,
     },
     "llm_variants": [],
     "topics": [
@@ -252,6 +254,8 @@ def _build_llm_config(raw: dict, *, config_stem: str, index: int, primary: bool)
         fulltext_chunk_chars=int(raw.get("fulltext_chunk_chars", 10000)),
         fulltext_chunk_overlap_chars=int(raw.get("fulltext_chunk_overlap_chars", 1200)),
         fulltext_max_chunks=int(raw.get("fulltext_max_chunks", 12)),
+        pdf_input_mode=str(raw.get("pdf_input_mode", "auto")),
+        pdf_inline_max_bytes=int(raw.get("pdf_inline_max_bytes", 12582912)),
     )
 
 

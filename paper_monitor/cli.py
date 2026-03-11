@@ -9,10 +9,11 @@ from paper_monitor.enrichment import EnrichmentPipeline
 from paper_monitor.llm import LLMClient
 from paper_monitor.llm_registry import build_runtime_variants
 from paper_monitor.pipeline import MonitorPipeline
-from paper_monitor.reports import generate_comparison_report, generate_report
+from paper_monitor.progress import ProgressBar
+from paper_monitor.reports import generate_comparison_report, generate_paper_reports, generate_report
 from paper_monitor.scheduler import run_daemon
 from paper_monitor.storage import Database
-from paper_monitor.utils import ensure_directory, now_iso, today_string
+from paper_monitor.utils import ensure_directory, now_iso, to_day_bounds, today_string
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--days", type=int, help="统计窗口天数，默认使用配置中的 report.lookback_days")
     report_parser.add_argument("--with-llm", action="store_true", help="若已配置 LLM，则生成主题级聚合摘要")
     report_parser.add_argument("--extra-config", action="append", help="额外加载一份配置文件中的 LLM 变体")
+
+    paper_report_parser = subparsers.add_parser("paper-report", help="生成单篇论文的 Markdown / HTML / JSON 报告")
+    paper_report_parser.add_argument("--paper-id", type=int, action="append", help="指定一个或多个 paper_id")
+    paper_report_parser.add_argument("--date", help="若不指定 --paper-id，则按时间窗口导出对应论文")
+    paper_report_parser.add_argument("--type", default="daily", choices=["daily", "weekly"])
+    paper_report_parser.add_argument("--days", type=int, help="统计窗口天数，默认使用配置中的 report.lookback_days")
+    paper_report_parser.add_argument("--extra-config", action="append", help="额外加载一份配置文件中的 LLM 变体")
 
     compare_parser = subparsers.add_parser("compare-report", help="使用两套配置生成并排对比报告")
     compare_parser.add_argument("--date", help="报告日期，格式 YYYY-MM-DD，默认今天")
@@ -232,6 +240,36 @@ def main(argv: list[str] | None = None) -> int:
             print(f"报告已生成: {paths['markdown']}")
             print(f"HTML: {paths['html']}")
             print(f"JSON: {paths['json']}")
+            print(f"单篇报告目录: {paths['papers_dir']}")
+            return 0
+
+        if args.command == "paper-report":
+            if args.paper_id:
+                paper_ids = args.paper_id
+            else:
+                report_date = args.date or today_string(settings.timezone)
+                lookback_days = args.days or settings.report.lookback_days
+                start_at, end_at = to_day_bounds(report_date, settings.timezone, lookback_days)
+                entries = db.fetch_report_entries(start_at, end_at, settings.report.include_maybe)
+                paper_ids = [entry.paper.id for entry in entries]
+            unique_paper_ids = list(dict.fromkeys(paper_ids))
+            progress_bar = ProgressBar("单篇报告", len(unique_paper_ids) or 1)
+            outputs = generate_paper_reports(
+                db,
+                settings,
+                unique_paper_ids,
+                llm_variants=enabled_variants,
+                progress_bar=progress_bar,
+            )
+            progress_bar.close(f"单篇报告已生成 {len(outputs)} 篇")
+            if not outputs:
+                print("没有找到可导出的论文。")
+                return 0
+            first = next(iter(outputs.values()))
+            print(f"单篇报告数量: {len(outputs)}")
+            print(f"示例 Markdown: {first['markdown']}")
+            print(f"示例 HTML: {first['html']}")
+            print(f"示例 JSON: {first['json']}")
             return 0
 
         if args.command == "run-once":
@@ -281,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"llm_summaries={enrichment_stats.llm_summaries}, skipped={enrichment_stats.skipped}"
                 )
             print(f"报告路径: {paths['markdown']}")
+            print(f"单篇报告目录: {paths['papers_dir']}")
             if stats.errors:
                 print("错误:")
                 for item in stats.errors:

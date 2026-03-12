@@ -89,32 +89,35 @@
     {
       "id": "matrix_free_fem",
       "display_name": "有限元分析 Matrix-Free 算法优化",
-      "description": "跟踪矩阵自由、部分装配、sum factorization、高阶有限元与相关 HPC 优化论文。",
+      "description": "跟踪 matrix-free、partial assembly、sum factorization、高阶有限元在 GPU、多核、SIMD、性能可移植和算子应用优化方面的论文，更偏实现与性能优化而非纯数学分析。",
       "source_queries": {
         "arxiv": [
           "all:\"matrix-free\" AND all:\"finite element\"",
           "all:\"partial assembly\" AND all:\"finite element\"",
           "all:\"sum factorization\" AND all:\"finite element\"",
-          "all:\"matrix-free\" AND all:\"multigrid\"",
-          "all:\"matrix-free\" AND all:\"preconditioner\"",
-          "all:\"matrix-free\" AND all:\"high-order finite element\"",
-          "all:\"libCEED\" AND all:\"matrix-free\""
+          "all:\"matrix-free\" AND all:\"operator application\"",
+          "all:\"matrix-free\" AND all:\"GPU\"",
+          "all:\"matrix-free\" AND all:\"performance portability\"",
+          "all:\"matrix-free\" AND all:\"vectorization\"",
+          "all:\"libCEED\""
         ],
         "dblp": [
           "\"matrix-free\" \"finite element\"",
           "\"partial assembly\" \"finite element\"",
           "\"sum factorization\" \"finite element\"",
-          "\"matrix-free\" multigrid",
-          "\"matrix-free\" preconditioner",
-          "\"matrix-free\" \"high-order finite element\"",
+          "\"matrix-free\" \"operator application\"",
+          "\"matrix-free\" GPU",
+          "\"matrix-free\" \"performance portability\"",
+          "\"matrix-free\" vectorization",
           "libCEED matrix-free"
         ],
         "google_scholar_alerts": [
           "\"matrix-free\" \"finite element\"",
           "\"partial assembly\" FEM",
           "\"sum factorization\" finite element",
-          "\"matrix-free\" multigrid finite element",
-          "\"matrix-free\" preconditioner finite element"
+          "\"matrix-free\" \"operator application\"",
+          "\"matrix-free\" GPU finite element",
+          "\"matrix-free\" \"performance portability\""
         ]
       },
       "must_match_groups": [
@@ -134,6 +137,18 @@
           "discontinuous galerkin",
           "dg",
           "spectral element"
+        ],
+        [
+          "operator",
+          "application",
+          "gpu",
+          "performance",
+          "vectorization",
+          "parallel",
+          "multigrid",
+          "preconditioner",
+          "simd",
+          "scaling"
         ]
       ],
       "positive_keywords": [
@@ -142,28 +157,72 @@
         "deal.ii",
         "deal ii",
         "operator application",
+        "fused operator",
         "multigrid",
         "preconditioner",
         "spectral element",
         "tensor contraction",
         "element restriction",
-        "gpu acceleration"
+        "performance portability",
+        "roofline",
+        "vectorization",
+        "simd",
+        "avx512",
+        "sve",
+        "gpu",
+        "gpu acceleration",
+        "cuda",
+        "hip",
+        "kokkos",
+        "raja",
+        "strong scaling",
+        "weak scaling",
+        "memory bandwidth",
+        "cache blocking"
       ],
       "exclude_keywords": [
         "matrix factorization",
         "graph neural network",
         "diffusion model",
-        "recommendation system"
+        "recommendation system",
+        "a posteriori error",
+        "a priori error",
+        "well posedness",
+        "existence and uniqueness",
+        "convergence proof",
+        "inverse problem"
       ],
       "arxiv_categories": [
-        "cs.NA",
+        "cs.DC",
         "cs.MS",
+        "cs.NA",
         "math.NA"
+      ],
+      "priority_arxiv_categories": [
+        "cs.DC",
+        "cs.MS",
+        "cs.NA"
       ],
       "dblp_venue_keywords": [
         "finite elements",
         "supercomputing",
-        "high performance"
+        "high performance",
+        "sc",
+        "ppopp",
+        "ipdps",
+        "ics",
+        "cluster",
+        "cgo",
+        "asplos"
+      ],
+      "priority_venue_keywords": [
+        "sc",
+        "ppopp",
+        "ipdps",
+        "ics",
+        "cluster",
+        "cgo",
+        "asplos"
       ],
       "threshold": 18
     },

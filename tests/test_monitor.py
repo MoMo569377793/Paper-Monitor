@@ -8,6 +8,7 @@ from pathlib import Path
 from paper_monitor.config import load_settings
 from paper_monitor.enrichment import DocumentArtifacts, EnrichmentPipeline
 from paper_monitor.llm import LLMClient
+from paper_monitor.llm_registry import LLMRuntimeVariant
 from paper_monitor.models import FetchPlan, LLMResult
 from paper_monitor.models import PaperCandidate, PaperRecord, RunStats, TopicEvaluation
 from paper_monitor.pipeline import MonitorPipeline
@@ -1356,6 +1357,114 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertIn("Ikun 总结", markdown)
             self.assertIn("\"variant_id\": \"poe\"", export)
             self.assertIn("\"variant_id\": \"ikun\"", export)
+
+            db.close()
+
+    def test_generate_catalog_report_hides_unrequested_stored_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = Path("/home/momo/git_ws/search/config/config-ikun.json").read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            pipeline._process_candidate(
+                PaperCandidate(
+                    source_name="arxiv",
+                    source_paper_id="2903.00002",
+                    query_text="matrix-free finite element",
+                    title="Matrix-Free Kernel Optimization",
+                    abstract="matrix-free finite element operator application on GPUs",
+                    authors=["Alice"],
+                    published_at="2026-03-10T09:00:00+08:00",
+                    updated_at="2026-03-10T09:00:00+08:00",
+                    primary_url="https://arxiv.org/abs/2903.00002",
+                    pdf_url="https://arxiv.org/pdf/2903.00002.pdf",
+                    doi="",
+                    arxiv_id="2903.00002",
+                    venue="arXiv",
+                    year=2026,
+                    categories=["cs.DC"],
+                    raw={"fixture": True},
+                ),
+                RunStats(),
+            )
+            db.upsert_paper_llm_summary(
+                1,
+                variant_id="legacy",
+                variant_label="legacy_model",
+                provider="openai_compatible",
+                base_url="https://legacy.example.com/v1",
+                model="legacy-model",
+                summary_text="Legacy 总结",
+                summary_basis="llm+abstract+metadata",
+                tags=["legacy"],
+                structured={"summary": "Legacy 总结", "source_mode": "abstract"},
+                usage={},
+            )
+            db.upsert_paper_llm_summary(
+                1,
+                variant_id="poe",
+                variant_label="poe_gemini-3.1-pro",
+                provider="openai_compatible",
+                base_url="https://api.poe.com/v1",
+                model="gemini-3.1-pro",
+                summary_text="Poe 总结",
+                summary_basis="llm+fulltext+metadata",
+                tags=["matrix-free"],
+                structured={"summary": "Poe 总结", "source_mode": "fulltext_txt"},
+                usage={},
+            )
+            db.upsert_paper_llm_summary(
+                1,
+                variant_id="ikun",
+                variant_label="ikun_gpt-5.4",
+                provider="IkunCoding",
+                base_url="https://api.ikuncode.cc/v1",
+                model="gpt-5.4",
+                summary_text="Ikun 总结",
+                summary_basis="llm+pdf+metadata",
+                tags=["matrix-free"],
+                structured={"summary": "Ikun 总结", "source_mode": "pdf_direct", "pdf_input_strategy": "chat_file"},
+                usage={},
+            )
+
+            client = LLMClient(settings.llm)
+            variants = [
+                LLMRuntimeVariant(
+                    variant_id="poe",
+                    label="config-poe.json / poe_gemini-3.1-pro",
+                    provider="openai_compatible",
+                    base_url="https://api.poe.com/v1",
+                    model="gemini-3.1-pro",
+                    config_path=root / "config" / "config-poe.json",
+                    client=client,
+                ),
+                LLMRuntimeVariant(
+                    variant_id="ikun",
+                    label="config-ikun.json / ikun_gpt-5.4",
+                    provider="IkunCoding",
+                    base_url="https://api.ikuncode.cc/v1",
+                    model="gpt-5.4",
+                    config_path=root / "config" / "config-ikun.json",
+                    client=client,
+                ),
+            ]
+
+            paths = generate_catalog_report(db, settings, llm_variants=variants)
+            markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
+            export = Path(paths["json"]).read_text(encoding="utf-8")
+
+            self.assertIn("poe_gemini-3.1-pro", markdown)
+            self.assertIn("ikun_gpt-5.4", markdown)
+            self.assertNotIn("legacy_model", markdown)
+            self.assertIn("\"variant_id\": \"poe\"", export)
+            self.assertIn("\"variant_id\": \"ikun\"", export)
+            self.assertNotIn("\"variant_id\": \"legacy\"", export)
 
             db.close()
 

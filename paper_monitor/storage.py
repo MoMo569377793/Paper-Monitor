@@ -670,35 +670,43 @@ class Database:
             paper_filter = f" AND p.id IN ({paper_placeholders})"
             params.extend(paper_ids)
 
-        rows = self.connection.execute(
-            f"""
-            SELECT
-                m.topic_id,
-                m.topic_name,
-                m.score,
-                m.classification,
-                m.matched_keywords_json,
-                m.reasons_json,
-                p.*,
-                GROUP_CONCAT(DISTINCT ps.source_name) AS source_names_csv,
-                GROUP_CONCAT(DISTINCT ps.source_url) AS source_urls_csv
-            FROM matches m
-            JOIN papers p ON p.id = m.paper_id
-            LEFT JOIN paper_sources ps ON ps.paper_id = p.id
-            WHERE m.classification IN ({placeholders})
-            {topic_filter}
-            {paper_filter}
-            GROUP BY m.id
-            ORDER BY m.topic_name ASC, COALESCE(NULLIF(p.published_at, ''), p.created_at) DESC, p.id DESC
-            """,
-            params,
-        ).fetchall()
+        rows: list[sqlite3.Row] = []
+        batch_size = 200
+        last_match_id = 0
+        while True:
+            batch = self.connection.execute(
+                f"""
+                SELECT
+                    m.id AS match_id,
+                    m.topic_id,
+                    m.topic_name,
+                    m.score,
+                    m.classification,
+                    m.matched_keywords_json,
+                    m.reasons_json,
+                    p.*
+                FROM matches m
+                JOIN papers p ON p.id = m.paper_id
+                WHERE m.classification IN ({placeholders})
+                {topic_filter}
+                {paper_filter}
+                  AND m.id > ?
+                ORDER BY m.id ASC
+                LIMIT ?
+                """,
+                [*params, last_match_id, batch_size],
+            ).fetchall()
+            if not batch:
+                break
+            rows.extend(batch)
+            last_match_id = int(batch[-1]["match_id"])
+            if len(batch) < batch_size:
+                break
 
         entries: list[ReportEntry] = []
         for row in rows:
             paper = self._row_to_paper(row)
-            source_names = [name for name in (row["source_names_csv"] or "").split(",") if name]
-            source_urls = [url for url in (row["source_urls_csv"] or "").split(",") if url]
+            source_names, source_urls = self.fetch_paper_sources(paper.id)
             entries.append(
                 ReportEntry(
                     topic_id=row["topic_id"],
@@ -712,6 +720,9 @@ class Database:
                     source_urls=source_urls,
                 )
             )
+        entries.sort(key=lambda entry: entry.paper.id, reverse=True)
+        entries.sort(key=lambda entry: entry.paper.published_at or entry.paper.created_at or "", reverse=True)
+        entries.sort(key=lambda entry: entry.topic_name)
         return entries
 
     def fetch_enrichment_candidates(

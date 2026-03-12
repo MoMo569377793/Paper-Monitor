@@ -466,6 +466,37 @@ def _merge_variants_with_stored_summaries(
     return merged
 
 
+def _allowed_variant_ids(variants: list[LLMRuntimeVariant | dict]) -> set[str]:
+    return {
+        str(_variant_attr(variant, "variant_id") or "").strip()
+        for variant in variants
+        if str(_variant_attr(variant, "variant_id") or "").strip()
+    }
+
+
+def _filter_summaries_by_variants(
+    paper_summaries_by_paper: dict[int, list[PaperLLMSummary]],
+    variants: list[LLMRuntimeVariant | dict],
+) -> dict[int, list[PaperLLMSummary]]:
+    allowed_variant_ids = _allowed_variant_ids(variants)
+    if not allowed_variant_ids:
+        return paper_summaries_by_paper
+    filtered: dict[int, list[PaperLLMSummary]] = {}
+    for paper_id, summaries in paper_summaries_by_paper.items():
+        filtered[paper_id] = [summary for summary in summaries if summary.variant_id in allowed_variant_ids]
+    return filtered
+
+
+def _resolve_display_variants(
+    variants: list[LLMRuntimeVariant | dict],
+    paper_summaries_by_paper: dict[int, list[PaperLLMSummary]],
+) -> tuple[list[LLMRuntimeVariant | dict], dict[int, list[PaperLLMSummary]]]:
+    requested_variants = list(variants)
+    if requested_variants:
+        return requested_variants, _filter_summaries_by_variants(paper_summaries_by_paper, requested_variants)
+    return _merge_variants_with_stored_summaries([], paper_summaries_by_paper), paper_summaries_by_paper
+
+
 def _render_paper_topics(evaluations: list[TopicEvaluation]) -> list[str]:
     if not evaluations:
         return ["- 主题匹配：无"]
@@ -661,10 +692,13 @@ def generate_paper_reports(
         evaluations = db.fetch_paper_evaluations(paper_id)
         source_names, source_urls = db.fetch_paper_sources(paper_id)
         summaries = summaries_by_paper.get(paper_id, [])
-        variants = _merge_variants_with_stored_summaries(
-            _variants_for_paper(summaries, llm_variants),
-            {paper_id: summaries},
-        )
+        requested_variants = _variants_for_paper(summaries, llm_variants)
+        if llm_variants:
+            allowed_variant_ids = _allowed_variant_ids(list(llm_variants))
+            summaries = [summary for summary in summaries if summary.variant_id in allowed_variant_ids]
+            variants = list(llm_variants)
+        else:
+            variants = _merge_variants_with_stored_summaries(requested_variants, {paper_id: summaries})
         stem = _paper_report_stem(paper)
         if progress_bar:
             progress_bar.set_detail(f"单篇导出 {shorten(paper.title, 52)}")
@@ -1357,11 +1391,11 @@ def generate_catalog_report(
 
     progress_bar.advance(detail="读取逐篇 LLM 摘要")
     paper_summaries_by_paper = db.fetch_paper_llm_summaries([entry.paper.id for entry in entries])
-    display_variants = _merge_variants_with_stored_summaries(report_variants, paper_summaries_by_paper)
+    display_variants, visible_summaries_by_paper = _resolve_display_variants(report_variants, paper_summaries_by_paper)
     topic_digests_by_variant = _collect_topic_digests_by_variant(
         settings,
         grouped_entries,
-        paper_summaries_by_paper,
+        visible_summaries_by_paper,
         report_variants,
         use_llm_topic_digest,
         progress_callback=lambda detail, advance: (
@@ -1386,7 +1420,7 @@ def generate_catalog_report(
     markdown_text = _render_catalog_markdown(
         generated_at,
         grouped_entries,
-        paper_summaries_by_paper,
+        visible_summaries_by_paper,
         topic_digests_by_variant,
         display_variants,
         settings,
@@ -1395,7 +1429,7 @@ def generate_catalog_report(
     html_text = _render_catalog_html(
         generated_at,
         grouped_entries,
-        paper_summaries_by_paper,
+        visible_summaries_by_paper,
         topic_digests_by_variant,
         display_variants,
         settings,
@@ -1433,7 +1467,7 @@ def generate_catalog_report(
                                     "summary_scope_note": _summary_scope_note(summary),
                                     "structured": summary.structured,
                                 }
-                                for summary in paper_summaries_by_paper.get(entry.paper.id, [])
+                                for summary in visible_summaries_by_paper.get(entry.paper.id, [])
                             ],
                         },
                     }
@@ -1673,11 +1707,11 @@ def generate_report(
 
     progress_bar.advance(detail="读取逐篇 LLM 摘要")
     paper_summaries_by_paper = db.fetch_paper_llm_summaries([entry.paper.id for entry in entries])
-    display_variants = _merge_variants_with_stored_summaries(report_variants, paper_summaries_by_paper)
+    display_variants, visible_summaries_by_paper = _resolve_display_variants(report_variants, paper_summaries_by_paper)
     topic_digests_by_variant = _collect_topic_digests_by_variant(
         settings,
         grouped_entries,
-        paper_summaries_by_paper,
+        visible_summaries_by_paper,
         report_variants,
         use_llm_topic_digest,
         progress_callback=lambda detail, advance: (
@@ -1704,7 +1738,7 @@ def generate_report(
         start_at,
         end_at,
         grouped_entries,
-        paper_summaries_by_paper,
+        visible_summaries_by_paper,
         topic_digests_by_variant,
         display_variants,
         settings,
@@ -1716,7 +1750,7 @@ def generate_report(
         start_at,
         end_at,
         grouped_entries,
-        paper_summaries_by_paper,
+        visible_summaries_by_paper,
         topic_digests_by_variant,
         display_variants,
         settings,
@@ -1788,7 +1822,7 @@ def generate_report(
                                     "structured": summary.structured,
                                     "usage": summary.usage,
                                 }
-                                for summary in paper_summaries_by_paper.get(entry.paper.id, [])
+                                for summary in visible_summaries_by_paper.get(entry.paper.id, [])
                             ],
                             "paper_report": paper_report_outputs.get(entry.paper.id, {}),
                         },

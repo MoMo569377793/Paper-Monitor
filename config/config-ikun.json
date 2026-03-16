@@ -90,7 +90,7 @@
     "fulltext_chunk_chars": 10000,
     "fulltext_chunk_overlap_chars": 1200,
     "fulltext_max_chunks": 12,
-    "pdf_input_mode": "auto",
+    "pdf_input_mode": "force",
     "pdf_inline_max_bytes": 12582912
   },
   "llm_variants": [],

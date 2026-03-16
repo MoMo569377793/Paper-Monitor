@@ -146,6 +146,10 @@ def map_reasoning_effort_to_poe_thinking_level(reasoning_effort: str) -> str:
     return "low"
 
 
+def is_claude_model(model: str) -> bool:
+    return model.strip().lower().startswith("claude")
+
+
 def truncate_for_preview(value: Any) -> Any:
     if isinstance(value, str):
         if len(value) <= STRING_PREVIEW_LIMIT:
@@ -193,6 +197,7 @@ def call_model(
         if reasoning_effort is not None
         else str(llm.get("model_reasoning_effort") or llm.get("reasoning_effort") or "").strip()
     )
+    chosen_output_effort = str(llm.get("model_output_effort") or llm.get("output_effort") or "").strip()
     chosen_thinking_level = str(llm.get("model_thinking_level") or llm.get("thinking_level") or "").strip()
     is_poe_api = "api.poe.com" in base_url.lower()
     is_gemini_model = model.lower().startswith("gemini")
@@ -250,6 +255,11 @@ def call_model(
             )
             if thinking_level:
                 extra_body["thinking_level"] = thinking_level
+        elif is_claude_model(model):
+            output_effort = chosen_output_effort or str(extra_body.get("output_effort", "")).strip()
+            if output_effort:
+                extra_body["output_effort"] = output_effort
+            extra_body.pop("reasoning_effort", None)
         elif chosen_reasoning_effort:
             extra_body["reasoning_effort"] = chosen_reasoning_effort
         if extra_body:

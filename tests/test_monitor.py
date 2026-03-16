@@ -1099,6 +1099,42 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertEqual(client.payloads[0].get("extra_body", {}).get("thinking_level"), "high")
             self.assertNotIn("reasoning_effort", client.payloads[0])
 
+    def test_poe_claude_payload_uses_output_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            (root / "config" / "config.json").write_text(FIXTURE_CONFIG_POE.read_text(encoding="utf-8"), encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            settings.llm.enabled = True
+            settings.llm.api_key_env = ""
+            settings.llm.model = "claude-opus-4.6"
+            settings.llm.model_reasoning_effort = "xhigh"
+            settings.llm.model_output_effort = "max"
+            settings.llm.output_effort_by_task = {"paper_summary": "max"}
+            settings.llm.extra_body = {}
+
+            class CaptureClient(LLMClient):
+                def __init__(self, config):  # noqa: ANN001
+                    super().__init__(config)
+                    self.payloads: list[dict] = []
+
+                def _post_json(self, url, payload, warn_on_error=True):  # noqa: ANN001, ARG002
+                    self.payloads.append(payload)
+                    return {
+                        "choices": [{"message": {"content": "ok"}}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    }
+
+            client = CaptureClient(settings.llm)
+            text, _ = client._post_chat_completions_text("sys", "user", task_name="paper_summary")
+
+            self.assertEqual(text, "ok")
+            extra_body = client.payloads[0].get("extra_body", {})
+            self.assertEqual(extra_body.get("output_effort"), "max")
+            self.assertNotIn("reasoning_effort", extra_body)
+            self.assertNotIn("reasoning_effort", client.payloads[0])
+
     def test_topic_digest_can_override_reasoning_by_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

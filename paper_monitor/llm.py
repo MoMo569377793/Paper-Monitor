@@ -281,11 +281,23 @@ class LLMClient:
                 return self._map_reasoning_effort_to_poe_thinking_level(reasoning_effort)
         return ""
 
+    def _output_effort_for_task(self, task_name: str) -> str:
+        task_value = str(self.config.output_effort_by_task.get(task_name, "")).strip()
+        if task_value:
+            return task_value
+        global_value = str(self.config.model_output_effort).strip()
+        if global_value:
+            return global_value
+        return str(self.config.extra_body.get("output_effort", "")).strip()
+
     def _is_poe_api(self) -> bool:
         return "api.poe.com" in self.config.base_url.lower()
 
     def _is_gemini_model(self) -> bool:
         return self.config.model.strip().lower().startswith("gemini")
+
+    def _is_claude_model(self) -> bool:
+        return self.config.model.strip().lower().startswith("claude")
 
     def _map_reasoning_effort_to_poe_thinking_level(self, reasoning_effort: str) -> str:
         value = reasoning_effort.strip().lower()
@@ -298,12 +310,17 @@ class LLMClient:
     def _apply_chat_request_options(self, payload: dict[str, Any], *, task_name: str) -> dict[str, Any]:
         extra_body = dict(self.config.extra_body or {})
         reasoning_effort = self._reasoning_effort_for_task(task_name)
+        output_effort = self._output_effort_for_task(task_name)
         thinking_level = self._thinking_level_for_task(task_name)
 
         if self._is_poe_api():
             if self._is_gemini_model():
                 if thinking_level:
                     extra_body["thinking_level"] = thinking_level
+            elif self._is_claude_model():
+                if output_effort:
+                    extra_body["output_effort"] = output_effort
+                extra_body.pop("reasoning_effort", None)
             elif reasoning_effort and "reasoning_effort" not in extra_body:
                 extra_body["reasoning_effort"] = reasoning_effort
         elif reasoning_effort:

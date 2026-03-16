@@ -73,13 +73,14 @@
     "model": "gpt-5.4",
     "model_reasoning_effort": "xhigh",
     "reasoning_by_task": {
-      "paper_summary": "high",
+      "pdf_brief": "xhigh",
+      "paper_summary": "xhigh",
       "paper_chunk": "low",
-      "paper_reduce": "high",
+      "paper_reduce": "xhigh",
       "topic_digest": "xhigh",
       "json_repair": "low"
     },
-    "timeout_seconds": 60,
+    "timeout_seconds": 180,
     "temperature": 0.2,
     "max_input_chars": 16000,
     "max_output_tokens": 700,

@@ -357,6 +357,78 @@ class Database:
             raise KeyError(f"paper not found: {paper_id}")
         return self._row_to_paper(row)
 
+    def find_papers(
+        self,
+        *,
+        title_substring: str | None = None,
+        url_substring: str | None = None,
+        doi: str | None = None,
+        arxiv_id: str | None = None,
+        topic_ids: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[PaperRecord]:
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        normalized_title = (title_substring or "").strip().lower()
+        if normalized_title:
+            where_clauses.append("LOWER(p.title) LIKE ?")
+            params.append(f"%{normalized_title}%")
+
+        normalized_url = (url_substring or "").strip().lower()
+        if normalized_url:
+            where_clauses.append(
+                """(
+                    LOWER(COALESCE(p.primary_url, '')) LIKE ?
+                    OR LOWER(COALESCE(p.pdf_url, '')) LIKE ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM paper_sources ps
+                        WHERE ps.paper_id = p.id
+                          AND LOWER(COALESCE(ps.source_url, '')) LIKE ?
+                    )
+                )"""
+            )
+            params.extend([f"%{normalized_url}%"] * 3)
+
+        normalized_doi = (doi or "").strip().lower()
+        if normalized_doi:
+            where_clauses.append("LOWER(COALESCE(p.doi, '')) = ?")
+            params.append(normalized_doi)
+
+        normalized_arxiv = (arxiv_id or "").strip().lower()
+        if normalized_arxiv:
+            where_clauses.append("LOWER(COALESCE(p.arxiv_id, '')) = ?")
+            params.append(normalized_arxiv)
+
+        if topic_ids:
+            placeholders = ", ".join(["?"] * len(topic_ids))
+            where_clauses.append(
+                f"""EXISTS (
+                    SELECT 1
+                    FROM matches m
+                    WHERE m.paper_id = p.id
+                      AND m.topic_id IN ({placeholders})
+                )"""
+            )
+            params.extend(topic_ids)
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+
+        rows = self.connection.execute(
+            f"""
+            SELECT DISTINCT p.*
+            FROM papers p
+            {where_sql}
+            ORDER BY COALESCE(NULLIF(p.published_at, ''), p.created_at) DESC, p.id DESC
+            LIMIT ?
+            """,
+            [*params, max(int(limit or 20), 1)],
+        ).fetchall()
+        return [self._row_to_paper(row) for row in rows]
+
     def _row_to_paper(self, row: sqlite3.Row) -> PaperRecord:
         return PaperRecord(
             id=int(row["id"]),

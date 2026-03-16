@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_parser.add_argument("--workers", type=int, default=1, help="增强阶段并发 worker 数，默认 1")
     enrich_parser.add_argument("--paper-id", type=int, action="append", help="仅增强指定一个或多个 paper_id")
     enrich_parser.add_argument("--since-last-run", action="store_true", help="只增强自上次成功增强后新增入库的论文")
+    enrich_parser.add_argument("--secondary-on-priority", action="store_true", help="仅让额外模型处理高优先级论文；主模型仍处理全部论文")
+    enrich_parser.add_argument("--secondary-top-per-topic", type=int, default=3, help="开启 --secondary-on-priority 后，每个领域送给额外模型二次总结的 Top N，默认 3")
+    enrich_parser.add_argument("--secondary-min-score", type=float, default=24.0, help="开启 --secondary-on-priority 后，评分不低于该值的论文会送给额外模型，默认 24")
 
     report_parser = subparsers.add_parser("report", help="仅生成报告")
     report_parser.add_argument("--date", help="报告日期，格式 YYYY-MM-DD，默认今天")
@@ -98,6 +101,14 @@ def build_parser() -> argparse.ArgumentParser:
     paper_delete_parser = subparsers.add_parser("paper-delete", help="按 paper_id 从数据库删除论文")
     paper_delete_parser.add_argument("--paper-id", type=int, action="append", required=True, help="一个或多个 paper_id")
 
+    paper_find_parser = subparsers.add_parser("paper-find", help="按标题、URL、DOI、arXiv ID 或领域查找论文，并显示 paper_id")
+    paper_find_parser.add_argument("--title", help="按标题关键字模糊查找")
+    paper_find_parser.add_argument("--url", help="按 primary_url / pdf_url / source_url 模糊查找")
+    paper_find_parser.add_argument("--doi", help="按 DOI 精确查找")
+    paper_find_parser.add_argument("--arxiv-id", help="按 arXiv ID 精确查找")
+    paper_find_parser.add_argument("--topic", action="append", help="仅在指定 topic id 内查找，可重复传入")
+    paper_find_parser.add_argument("--limit", type=int, default=20, help="最多显示多少条，默认 20")
+
     compare_parser = subparsers.add_parser("compare-report", help="使用两套配置生成并排对比报告")
     compare_parser.add_argument("--date", help="报告日期，格式 YYYY-MM-DD，默认今天")
     compare_parser.add_argument("--type", default="weekly", choices=["daily", "weekly"])
@@ -120,6 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_once_parser.add_argument("--recent-limit", type=int, help="按时间顺序保留最近多少篇论文")
     run_once_parser.add_argument("--page-size", type=int, help="单次请求分页大小")
     run_once_parser.add_argument("--since-last-run", action="store_true", help="只处理自上次成功抓取后新增的论文")
+    run_once_parser.add_argument("--secondary-on-priority", action="store_true", help="仅让额外模型处理高优先级论文；主模型仍处理全部论文")
+    run_once_parser.add_argument("--secondary-top-per-topic", type=int, default=3, help="开启 --secondary-on-priority 后，每个领域送给额外模型二次总结的 Top N，默认 3")
+    run_once_parser.add_argument("--secondary-min-score", type=float, default=24.0, help="开启 --secondary-on-priority 后，评分不低于该值的论文会送给额外模型，默认 24")
 
     daemon_parser = subparsers.add_parser("daemon", help="持续轮询抓取，并覆盖更新当天报告")
     daemon_parser.add_argument("--type", default="daily", choices=["daily", "weekly"])
@@ -130,6 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser.add_argument("--skip-pdf", action="store_true", help="跳过 PDF 下载与全文抽取，只基于标题/摘要生成总结")
     daemon_parser.add_argument("--workers", type=int, default=1, help="增强阶段并发 worker 数，默认 1")
     daemon_parser.add_argument("--since-last-run", action="store_true", help="每轮仅处理自上次成功抓取后新增的论文")
+    daemon_parser.add_argument("--secondary-on-priority", action="store_true", help="仅让额外模型处理高优先级论文；主模型仍处理全部论文")
+    daemon_parser.add_argument("--secondary-top-per-topic", type=int, default=3, help="开启 --secondary-on-priority 后，每个领域送给额外模型二次总结的 Top N，默认 3")
+    daemon_parser.add_argument("--secondary-min-score", type=float, default=24.0, help="开启 --secondary-on-priority 后，评分不低于该值的论文会送给额外模型，默认 24")
 
     return parser
 
@@ -279,6 +296,33 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"- {item}")
             return 0
 
+        if args.command == "paper-find":
+            matches = db.find_papers(
+                title_substring=args.title,
+                url_substring=args.url,
+                doi=args.doi,
+                arxiv_id=args.arxiv_id,
+                topic_ids=args.topic,
+                limit=args.limit,
+            )
+            if not matches:
+                print("没有找到匹配的论文。")
+                return 0
+            print(f"找到 {len(matches)} 篇论文:")
+            for paper in matches:
+                evaluations = db.fetch_paper_evaluations(paper.id)
+                topics_text = ", ".join(
+                    f"{item.topic_id}:{item.classification}:{item.score:g}" for item in evaluations[:4]
+                ) or "无"
+                print(f"- paper_id={paper.id}")
+                print(f"  标题: {paper.title}")
+                print(f"  领域: {topics_text}")
+                print(f"  发表: {paper.published_at or paper.created_at or '未知'}")
+                print(f"  PDF: {'有' if paper.pdf_local_path else '无'} / 全文: {paper.fulltext_status or 'empty'}")
+                if paper.primary_url:
+                    print(f"  链接: {paper.primary_url}")
+            return 0
+
         if args.command == "fetch":
             selected_sources = set(args.source or [])
             stats = pipeline.run_fetch(
@@ -312,6 +356,9 @@ def main(argv: list[str] | None = None) -> int:
                 use_llm=args.with_llm or None,
                 skip_document_processing=args.skip_pdf,
                 workers=args.workers,
+                secondary_priority_only=args.secondary_on_priority,
+                secondary_top_per_topic=args.secondary_top_per_topic,
+                secondary_min_score=args.secondary_min_score,
             )
             if args.since_last_run and enrich_started_at is not None and not stats.errors:
                 db.set_checkpoint(ENRICH_CHECKPOINT_KEY, enrich_started_at)
@@ -408,6 +455,9 @@ def main(argv: list[str] | None = None) -> int:
                     use_llm=args.with_llm or None,
                     skip_document_processing=args.skip_pdf,
                     workers=args.workers,
+                    secondary_priority_only=args.secondary_on_priority,
+                    secondary_top_per_topic=args.secondary_top_per_topic,
+                    secondary_min_score=args.secondary_min_score,
                 )
                 if args.since_last_run and enrich_started_at is not None and not enrichment_stats.errors:
                     db.set_checkpoint(ENRICH_CHECKPOINT_KEY, enrich_started_at)
@@ -458,6 +508,9 @@ def main(argv: list[str] | None = None) -> int:
                 skip_document_processing=args.skip_pdf,
                 workers=args.workers,
                 since_last_run=args.since_last_run,
+                secondary_priority_only=args.secondary_on_priority,
+                secondary_top_per_topic=args.secondary_top_per_topic,
+                secondary_min_score=args.secondary_min_score,
             )
             return 0
 

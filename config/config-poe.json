@@ -72,11 +72,12 @@
     "api_key_env": "POE_API_KEY",
     "model": "gpt-5.4",
     "model_reasoning_effort": "xhigh",
-    "thinking_level_by_task": {
-      "paper_summary": "high",
+    "reasoning_by_task": {
+      "pdf_brief": "high",
+      "paper_summary": "xhigh",
       "paper_chunk": "low",
-      "paper_reduce": "high",
-      "topic_digest": "high",
+      "paper_reduce": "xhigh",
+      "topic_digest": "xhigh",
       "json_repair": "low"
     },
     "timeout_seconds": 60,
@@ -89,7 +90,7 @@
     "fulltext_chunk_chars": 10000,
     "fulltext_chunk_overlap_chars": 1200,
     "fulltext_max_chunks": 12,
-    "pdf_input_mode": "auto",
+    "pdf_input_mode": "force",
     "pdf_inline_max_bytes": 12582912
   },
   "llm_variants": [],

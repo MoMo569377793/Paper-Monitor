@@ -17,3 +17,4 @@ artifacts/text/*
 *.env
 .codex.env
 .condex.env
+tmp/

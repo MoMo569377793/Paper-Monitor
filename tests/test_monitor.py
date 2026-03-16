@@ -730,7 +730,7 @@ class MonitorPipelineTest(unittest.TestCase):
 
                 def _post_json(self, url, payload, warn_on_error=True):  # noqa: ANN001, ARG002
                     messages = payload.get("messages", [])
-                    user_content = messages[1].get("content", []) if len(messages) > 1 else []
+                    user_content = messages[0].get("content", []) if messages else []
                     if isinstance(user_content, list):
                         self.pdf_request_count += 1
                         prompt_text = json.dumps(user_content, ensure_ascii=False)
@@ -743,19 +743,15 @@ class MonitorPipelineTest(unittest.TestCase):
                             "choices": [
                                 {
                                     "message": {
-                                        "content": json.dumps(
-                                            {
-                                                "summary": "模型直接阅读 PDF 后总结了整篇论文。",
-                                                "problem": "论文关注矩阵自由有限元算子效率。",
-                                                "method": "直接从 PDF 中识别方法与实验。",
-                                                "application": "高阶有限元与 GPU 求解。",
-                                                "results": "实验显示吞吐提升。",
-                                                "contributions": ["直接 PDF 阅读", "保留全文上下文"],
-                                                "limitations": ["依赖后端支持 PDF"],
-                                                "tags": ["matrix-free", "gpu"],
-                                                "basis": "llm+pdf+metadata",
-                                            },
-                                            ensure_ascii=False,
+                                        "content": (
+                                            "摘要：模型直接阅读 PDF 后总结了整篇论文，并明确保留了全文上下文。\n"
+                                            "问题：论文关注矩阵自由有限元算子效率。\n"
+                                            "方法：直接从 PDF 中识别方法与实验。\n"
+                                            "应用：高阶有限元与 GPU 求解。\n"
+                                            "结果：实验显示吞吐提升。\n"
+                                            "贡献：直接 PDF 阅读；保留全文上下文。\n"
+                                            "局限：依赖后端支持 PDF。\n"
+                                            "标签：matrix-free, gpu"
                                         )
                                     }
                                 }
@@ -776,6 +772,147 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertTrue(result.structured.get("pdf_input_used"))
             self.assertEqual(result.structured.get("pdf_input_strategy"), "chat_file")
             self.assertGreaterEqual(client.pdf_request_count, 2)
+
+    def test_parse_pdf_brief_summary_extracts_labeled_sections(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_POE)
+        client = LLMClient(settings.llm)
+        parsed = client._parse_pdf_brief_summary(
+            "摘要：这是一段摘要。\n"
+            "问题：问题描述。\n"
+            "方法：方法描述。\n"
+            "应用：应用描述。\n"
+            "结果：结果描述。\n"
+            "贡献：贡献一；贡献二。\n"
+            "局限：局限一；局限二。\n"
+            "标签：tag-a, tag-b"
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["basis"], "llm+pdf+metadata")
+        self.assertEqual(parsed["problem"], "问题描述。")
+        self.assertEqual(parsed["contributions"], ["贡献一", "贡献二。"])
+        self.assertEqual(parsed["tags"], ["tag-a", "tag-b"])
+
+    def test_secondary_variants_can_be_restricted_to_priority_papers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            (root / "config" / "config.json").write_text(FIXTURE_CONFIG_POE.read_text(encoding="utf-8"), encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+
+            topic = next(item for item in settings.topics if item.id == "ai_operator_acceleration")
+            candidates = []
+            for index, score in enumerate([31.0, 22.0, 18.0], start=1):
+                candidate = PaperCandidate(
+                    source_name="manual",
+                    source_paper_id=f"manual-{index}",
+                    query_text="manual",
+                    title=f"Priority Paper {index}",
+                    abstract="kernel fusion and tensor compiler for deep learning inference",
+                    authors=["Alice"],
+                    published_at=f"2026-03-{10+index:02d}",
+                    updated_at=f"2026-03-{10+index:02d}",
+                    primary_url=f"https://example.com/{index}",
+                    pdf_url="",
+                    doi="",
+                    arxiv_id="",
+                    venue="MLSys",
+                    year=2026,
+                    categories=["cs.LG"],
+                    raw={"fixture": True},
+                )
+                paper_id, _ = db.upsert_paper(candidate)
+                db.upsert_match(
+                    paper_id,
+                    TopicEvaluation(
+                        topic_id=topic.id,
+                        topic_name=topic.display_name,
+                        score=score,
+                        classification="relevant",
+                        matched_keywords=["kernel fusion"],
+                        reasons=["fixture"],
+                    ),
+                )
+                candidates.append(db.get_paper(paper_id))
+
+            class DummyClient:
+                def __init__(self, enabled=True):  # noqa: ANN001
+                    self.enabled = enabled
+
+            variants = [
+                LLMRuntimeVariant(
+                    variant_id="poe",
+                    label="poe",
+                    provider="openai_compatible",
+                    base_url="https://example.invalid/v1",
+                    model="gpt-5.4",
+                    config_path=FIXTURE_CONFIG_POE,
+                    client=DummyClient(),
+                ),
+                LLMRuntimeVariant(
+                    variant_id="ikun",
+                    label="ikun",
+                    provider="IkunCoding",
+                    base_url="https://example.invalid/v1",
+                    model="gpt-5.4",
+                    config_path=FIXTURE_CONFIG_IKUN,
+                    client=DummyClient(),
+                ),
+            ]
+
+            pipeline = EnrichmentPipeline(settings, db, llm_variants=variants)
+            target_map = pipeline._build_target_variants_map(  # noqa: SLF001
+                candidates,
+                use_llm=True,
+                secondary_priority_only=True,
+                secondary_top_per_topic=1,
+                secondary_min_score=30.0,
+            )
+
+            self.assertEqual([variant.variant_id for variant in target_map[candidates[0].id]], ["poe", "ikun"])
+            self.assertEqual([variant.variant_id for variant in target_map[candidates[1].id]], ["poe"])
+            self.assertEqual([variant.variant_id for variant in target_map[candidates[2].id]], ["poe"])
+            db.close()
+
+    def test_find_papers_supports_title_and_doi_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            (root / "config" / "config.json").write_text(FIXTURE_CONFIG_POE.read_text(encoding="utf-8"), encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+
+            candidate = PaperCandidate(
+                source_name="manual",
+                source_paper_id="manual-find-1",
+                query_text="manual",
+                title="Manual Tensor Core Study",
+                abstract="tensor core optimization",
+                authors=["Alice"],
+                published_at="2026-03-16",
+                updated_at="2026-03-16",
+                primary_url="https://example.com/manual-study",
+                pdf_url="https://example.com/manual-study.pdf",
+                doi="10.1000/manual-study",
+                arxiv_id="",
+                venue="manual",
+                year=2026,
+                categories=["cs.LG"],
+                raw={"fixture": True},
+            )
+            paper_id, _ = db.upsert_paper(candidate)
+
+            by_title = db.find_papers(title_substring="tensor core", limit=10)
+            by_doi = db.find_papers(doi="10.1000/manual-study", limit=10)
+
+            self.assertEqual([paper.id for paper in by_title], [paper_id])
+            self.assertEqual([paper.id for paper in by_doi], [paper_id])
+            db.close()
 
     def test_llm_summary_falls_back_to_fulltext_when_pdf_direct_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -855,7 +992,7 @@ class MonitorPipelineTest(unittest.TestCase):
 
                 def _post_json(self, url, payload, warn_on_error=True):  # noqa: ANN001, ARG002
                     messages = payload.get("messages", [])
-                    user_content = messages[1].get("content", []) if len(messages) > 1 else []
+                    user_content = messages[0].get("content", []) if messages else []
                     if isinstance(user_content, list):
                         self.pdf_probe_attempts += 1
                         return None
@@ -928,7 +1065,7 @@ class MonitorPipelineTest(unittest.TestCase):
             text, _ = client._post_chat_completions_text("sys", "user", task_name="paper_summary")
 
             self.assertEqual(text, "ok")
-            self.assertEqual(client.payloads[0].get("reasoning_effort"), "high")
+            self.assertEqual(client.payloads[0].get("reasoning_effort"), "xhigh")
 
     def test_poe_gemini_payload_maps_reasoning_to_thinking_level(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

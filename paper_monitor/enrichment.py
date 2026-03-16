@@ -246,6 +246,9 @@ class EnrichmentPipeline:
         use_llm: bool | None = None,
         skip_document_processing: bool = False,
         workers: int = 1,
+        secondary_priority_only: bool = False,
+        secondary_top_per_topic: int = 3,
+        secondary_min_score: float = 24.0,
     ) -> RunStats:
         stats = RunStats()
         if not self.settings.enrichment.enabled and not force:
@@ -266,6 +269,13 @@ class EnrichmentPipeline:
         enabled_variants = [variant for variant in self.llm_variants if variant.client.enabled]
         use_llm_effective = bool(enabled_variants) if use_llm is None else (use_llm and bool(enabled_variants))
         worker_count = max(int(workers or 1), 1)
+        target_variants_by_paper = self._build_target_variants_map(
+            candidates,
+            use_llm=use_llm_effective,
+            secondary_priority_only=secondary_priority_only,
+            secondary_top_per_topic=secondary_top_per_topic,
+            secondary_min_score=secondary_min_score,
+        )
 
         if skip_document_processing and use_llm_effective and worker_count > 1:
             return self._run_llm_only_concurrent(
@@ -274,6 +284,7 @@ class EnrichmentPipeline:
                 force=force,
                 progress_bar=progress_bar,
                 workers=worker_count,
+                target_variants_by_paper=target_variants_by_paper,
             )
 
         for paper in candidates:
@@ -283,6 +294,7 @@ class EnrichmentPipeline:
                 force=force,
                 use_llm=use_llm_effective,
                 skip_document_processing=skip_document_processing,
+                target_variants=target_variants_by_paper.get(paper.id),
             ):
                 stats.skipped += 1
                 progress_bar.advance(detail=f"跳过 {title}")
@@ -296,6 +308,7 @@ class EnrichmentPipeline:
                     use_llm=use_llm_effective,
                     skip_document_processing=skip_document_processing,
                     progress_bar=progress_bar,
+                    target_variants=target_variants_by_paper.get(paper.id),
                 )
                 progress_bar.advance(detail=f"完成 {title}")
             except (OSError, subprocess.SubprocessError, urllib.error.URLError) as exc:
@@ -315,27 +328,30 @@ class EnrichmentPipeline:
         force: bool,
         progress_bar: ProgressBar,
         workers: int,
+        target_variants_by_paper: dict[int, list[LLMRuntimeVariant]],
     ) -> RunStats:
         jobs = []
         for paper in candidates:
             title = shorten(paper.title, 56)
+            target_variants = target_variants_by_paper.get(paper.id, [])
             if self._should_skip(
                 paper,
                 force=force,
                 use_llm=True,
                 skip_document_processing=True,
+                target_variants=target_variants,
             ):
                 stats.skipped += 1
                 progress_bar.advance(detail=f"跳过 {title}")
                 continue
             evaluations = self.db.fetch_paper_evaluations(paper.id)
             existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if not force else set()
-            target_variants = [
+            active_variants = [
                 variant
-                for variant in self.llm_variants
+                for variant in target_variants
                 if variant.client.enabled and (force or variant.variant_id not in existing_variant_ids)
             ]
-            jobs.append((paper, evaluations, target_variants))
+            jobs.append((paper, evaluations, active_variants))
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_map = {
@@ -451,6 +467,7 @@ class EnrichmentPipeline:
         force: bool,
         use_llm: bool,
         skip_document_processing: bool = False,
+        target_variants: list[LLMRuntimeVariant] | None = None,
     ) -> bool:
         if force:
             return False
@@ -461,7 +478,8 @@ class EnrichmentPipeline:
         )
         needs_pdf_state_refresh = not skip_document_processing and paper.pdf_status == "pending"
         existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if use_llm else set()
-        target_variant_ids = {variant.variant_id for variant in self.llm_variants if variant.client.enabled}
+        effective_variants = target_variants if target_variants is not None else self.llm_variants
+        target_variant_ids = {variant.variant_id for variant in effective_variants if variant.client.enabled}
         needs_llm = use_llm and bool(target_variant_ids - existing_variant_ids)
         needs_offline_refresh = (
             not use_llm
@@ -480,6 +498,7 @@ class EnrichmentPipeline:
         use_llm: bool,
         skip_document_processing: bool,
         progress_bar: ProgressBar | None = None,
+        target_variants: list[LLMRuntimeVariant] | None = None,
     ) -> None:
         title = shorten(paper.title, 56)
         if not skip_document_processing and (force or paper.fulltext_status != "extracted" or paper.pdf_status == "pending"):
@@ -508,7 +527,8 @@ class EnrichmentPipeline:
         existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if use_llm and not force else set()
         llm_results = []
         if use_llm:
-            for variant in self.llm_variants:
+            candidate_variants = target_variants if target_variants is not None else self.llm_variants
+            for variant in candidate_variants:
                 if not variant.client.enabled:
                     continue
                 if not force and variant.variant_id in existing_variant_ids:
@@ -531,3 +551,62 @@ class EnrichmentPipeline:
             stats,
             use_llm=use_llm,
         )
+
+    def _build_target_variants_map(
+        self,
+        candidates: list[PaperRecord],
+        *,
+        use_llm: bool,
+        secondary_priority_only: bool,
+        secondary_top_per_topic: int,
+        secondary_min_score: float,
+    ) -> dict[int, list[LLMRuntimeVariant]]:
+        enabled_variants = [variant for variant in self.llm_variants if variant.client.enabled]
+        if not use_llm or not enabled_variants:
+            return {paper.id: [] for paper in candidates}
+        if not secondary_priority_only or len(enabled_variants) <= 1:
+            return {paper.id: list(enabled_variants) for paper in candidates}
+
+        primary_variant = enabled_variants[0]
+        secondary_variants = enabled_variants[1:]
+        priority_paper_ids = self._select_priority_paper_ids(
+            candidates,
+            top_per_topic=secondary_top_per_topic,
+            min_score=secondary_min_score,
+        )
+        mapping: dict[int, list[LLMRuntimeVariant]] = {}
+        for paper in candidates:
+            target_variants = [primary_variant]
+            if paper.id in priority_paper_ids:
+                target_variants.extend(secondary_variants)
+            mapping[paper.id] = target_variants
+        return mapping
+
+    def _select_priority_paper_ids(
+        self,
+        candidates: list[PaperRecord],
+        *,
+        top_per_topic: int,
+        min_score: float,
+    ) -> set[int]:
+        top_limit = max(int(top_per_topic or 0), 0)
+        selected: set[int] = set()
+        by_topic: dict[str, list[tuple[float, str, int]]] = {}
+        for paper in candidates:
+            evaluations = self.db.fetch_paper_evaluations(paper.id)
+            relevant_evaluations = [item for item in evaluations if item.classification == "relevant"]
+            if not relevant_evaluations:
+                continue
+            best_score = max(item.score for item in relevant_evaluations)
+            if best_score >= float(min_score):
+                selected.add(paper.id)
+            for evaluation in relevant_evaluations:
+                timestamp = paper.published_at or paper.updated_at or paper.created_at
+                by_topic.setdefault(evaluation.topic_id, []).append((evaluation.score, timestamp, paper.id))
+
+        if top_limit > 0:
+            for entries in by_topic.values():
+                entries.sort(key=lambda item: (item[0], item[1], -item[2]), reverse=True)
+                for _, _, paper_id in entries[:top_limit]:
+                    selected.add(paper_id)
+        return selected

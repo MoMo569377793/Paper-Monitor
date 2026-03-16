@@ -33,6 +33,7 @@ PDF_STRATEGY_RESPONSES = "responses_input_file"
 PDF_STRATEGY_CHAT_FILE = "chat_file"
 PDF_STRATEGY_CHAT_INPUT_FILE = "chat_input_file"
 TASK_PAPER_SUMMARY = "paper_summary"
+TASK_PDF_BRIEF = "pdf_brief"
 TASK_PAPER_CHUNK = "paper_chunk"
 TASK_PAPER_REDUCE = "paper_reduce"
 TASK_TOPIC_DIGEST = "topic_digest"
@@ -436,6 +437,44 @@ class LLMClient:
             return parsed.get(schema_name), usage
         return parsed, usage
 
+    def _request_text_with_pdf(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        pdf_path: Path,
+        pdf_strategy: str,
+        max_output_tokens: int | None = None,
+        task_name: str = TASK_PAPER_SUMMARY,
+    ) -> tuple[str | None, dict[str, Any]]:
+        data_url = self._build_pdf_data_url(pdf_path)
+        if not data_url:
+            return None, {}
+        if pdf_strategy == PDF_STRATEGY_RESPONSES:
+            content, usage = self._post_responses_text_with_pdf(
+                system_prompt,
+                user_prompt,
+                pdf_filename=pdf_path.name,
+                pdf_data_url=data_url,
+                max_output_tokens=max_output_tokens,
+                task_name=task_name,
+            )
+        elif pdf_strategy in {PDF_STRATEGY_CHAT_FILE, PDF_STRATEGY_CHAT_INPUT_FILE}:
+            content, usage = self._post_chat_completions_text_with_pdf(
+                system_prompt,
+                user_prompt,
+                pdf_filename=pdf_path.name,
+                pdf_data_url=data_url,
+                file_item_type="file" if pdf_strategy == PDF_STRATEGY_CHAT_FILE else "input_file",
+                max_output_tokens=max_output_tokens,
+                task_name=task_name,
+            )
+        else:
+            return None, {}
+        if not content:
+            return None, usage
+        return THINK_TAG_RE.sub("", str(content)).strip() or None, usage
+
     def _repair_response_json(
         self,
         content: str,
@@ -549,17 +588,67 @@ class LLMClient:
                     "file_data": pdf_data_url,
                 },
             }
+        content_items = [file_item, {"type": "text", "text": prompt_with_schema}]
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
             "max_tokens": max_output_tokens or self.config.max_output_tokens,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [file_item, {"type": "text", "text": prompt_with_schema}],
+                },
+            ],
+        }
+        payload = self._apply_chat_request_options(payload, task_name=task_name)
+        data = self._post_json(self.config.base_url.rstrip("/") + "/chat/completions", payload, warn_on_error=False)
+        if not data:
+            return None, {}
+        choices = data.get("choices", [])
+        if not choices:
+            return None, self._parse_usage(data)
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+        return str(content), self._parse_usage(data)
+
+    def _post_chat_completions_text_with_pdf(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        pdf_filename: str,
+        pdf_data_url: str,
+        file_item_type: str,
+        max_output_tokens: int | None = None,
+        task_name: str = TASK_PAPER_SUMMARY,
+    ) -> tuple[str | None, dict[str, Any]]:
+        file_item: dict[str, Any]
+        if file_item_type == "input_file":
+            file_item = {
+                "type": "input_file",
+                "filename": pdf_filename,
+                "file_data": pdf_data_url,
+            }
+        else:
+            file_item = {
+                "type": "file",
+                "file": {
+                    "filename": pdf_filename,
+                    "file_data": pdf_data_url,
+                },
+            }
+        payload = {
+            "model": self.config.model,
+            "temperature": self.config.temperature,
+            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt_with_schema},
                         file_item,
+                        {"type": "text", "text": user_prompt},
                     ],
                 },
             ],
@@ -703,6 +792,42 @@ class LLMClient:
         }
         payload = self._apply_responses_request_options(payload, task_name=task_name)
         data = self._post_json(self.config.base_url.rstrip("/") + "/responses", payload)
+        if not data:
+            return None, {}
+        return self._extract_responses_text(data), self._parse_usage(data)
+
+    def _post_responses_text_with_pdf(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        pdf_filename: str,
+        pdf_data_url: str,
+        max_output_tokens: int | None = None,
+        task_name: str = TASK_PAPER_SUMMARY,
+    ) -> tuple[str | None, dict[str, Any]]:
+        payload = {
+            "model": self.config.model,
+            "instructions": system_prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "filename": pdf_filename,
+                            "file_data": pdf_data_url,
+                        },
+                        {"type": "input_text", "text": user_prompt},
+                    ],
+                }
+            ],
+            "temperature": self.config.temperature,
+            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "store": self.config.store,
+        }
+        payload = self._apply_responses_request_options(payload, task_name=task_name)
+        data = self._post_json(self.config.base_url.rstrip("/") + "/responses", payload, warn_on_error=False)
         if not data:
             return None, {}
         return self._extract_responses_text(data), self._parse_usage(data)
@@ -898,6 +1023,8 @@ class LLMClient:
         pdf_path: Path,
         pdf_strategy: str,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        if self.provider not in {"openai_responses", "openai", "responses"}:
+            return self._generate_summary_from_pdf_via_brief(paper, evaluations, pdf_path, pdf_strategy)
         prefer_compact = self._prefers_compact_mode()
         parsed = None
         usage_items: list[dict[str, Any]] = []
@@ -953,6 +1080,56 @@ class LLMClient:
         parsed["pdf_filename"] = pdf_path.name
         parsed["pdf_input_strategy"] = pdf_strategy
         parsed["direct_pdf_status"] = "used"
+        return parsed, self._merge_usage_items(usage_items)
+
+    def _generate_summary_from_pdf_via_brief(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        pdf_path: Path,
+        pdf_strategy: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        usage_items: list[dict[str, Any]] = []
+        brief_text, usage = self._request_text_with_pdf(
+            system_prompt=(
+                "你是一个中文论文总结助手。"
+                "你会收到完整论文 PDF。"
+                "请阅读全文后按固定标签输出，不要输出思考过程，不要输出 Markdown 代码块。"
+            ),
+            user_prompt=self._build_pdf_brief_prompt(paper, evaluations),
+            pdf_path=pdf_path,
+            pdf_strategy=pdf_strategy,
+            max_output_tokens=max(self.config.max_output_tokens, 900),
+            task_name=TASK_PDF_BRIEF,
+        )
+        usage_items.append(usage)
+        if not brief_text:
+            return None, self._merge_usage_items(usage_items)
+
+        parsed = self._parse_pdf_brief_summary(brief_text)
+        if parsed is None:
+            parsed, usage = self._request_structured_json(
+                system_prompt=(
+                    "你是一个中文 JSON 整理助手。"
+                    "你会收到一份已经基于整篇论文 PDF 阅读得到的中文摘要备忘录。"
+                    "请只把它整理为最终 JSON，不要补充未出现的事实。"
+                ),
+                user_prompt=self._build_pdf_brief_repair_prompt(paper, evaluations, brief_text),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+                max_output_tokens=max(self.config.max_output_tokens, 900),
+                task_name=TASK_JSON_REPAIR,
+            )
+            usage_items.append(usage)
+            if not parsed:
+                return None, self._merge_usage_items(usage_items)
+
+        parsed["source_mode"] = "pdf_direct"
+        parsed["pdf_input_used"] = True
+        parsed["pdf_filename"] = pdf_path.name
+        parsed["pdf_input_strategy"] = pdf_strategy
+        parsed["direct_pdf_status"] = "used"
+        parsed["basis"] = "llm+pdf+metadata"
         return parsed, self._merge_usage_items(usage_items)
 
     def _load_fulltext_text(self, paper: PaperRecord) -> str:
@@ -1199,6 +1376,28 @@ class LLMClient:
             f"全文说明:\n{context['fulltext']}\n"
         )
 
+    def _build_pdf_brief_prompt(self, paper: PaperRecord, evaluations: list[TopicEvaluation]) -> str:
+        _ = paper, evaluations
+        return (
+            "请阅读全文后，用中文写一个紧凑摘要，必须包含：问题、方法、应用、结果、局限。"
+            "不要输出JSON，不要输出思考过程。总字数控制在300字以内。"
+        )
+
+    def _build_pdf_brief_repair_prompt(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        brief_text: str,
+    ) -> str:
+        topics_text = self._topics_text(evaluations)
+        return (
+            "下面是一份已经基于整篇论文 PDF 阅读得到的中文摘要备忘录。"
+            "请只依据这份备忘录整理为最终 JSON，不要补充不存在的内容。\n\n"
+            f"标题: {paper.title}\n"
+            f"相关主题:\n{topics_text or '- 无'}\n\n"
+            f"PDF 摘要备忘录:\n{brief_text}\n"
+        )
+
     def _build_paper_chunk_prompt(
         self,
         paper: PaperRecord,
@@ -1378,6 +1577,51 @@ class LLMClient:
         if source_mode == "pdf_direct":
             return "llm+pdf+metadata"
         return "llm+fulltext+metadata" if has_fulltext else "llm+abstract+metadata"
+
+    def _parse_pdf_brief_summary(self, brief_text: str) -> dict[str, Any] | None:
+        text = THINK_TAG_RE.sub("", brief_text).strip()
+        if not text:
+            return None
+        labels = ["摘要", "问题", "方法", "应用", "结果", "贡献", "局限", "标签"]
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        values: dict[str, str] = {}
+        for index, label in enumerate(labels):
+            pattern = rf"{label}\s*[：:]\s*"
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            start = match.end()
+            end = len(normalized)
+            for next_label in labels[index + 1 :]:
+                next_match = re.search(rf"\n?\s*{next_label}\s*[：:]\s*", normalized[start:])
+                if next_match:
+                    end = start + next_match.start()
+                    break
+            values[label] = normalized[start:end].strip()
+        required = {"问题", "方法", "应用", "结果"}
+        if not required.issubset(values):
+            return None
+        contributions = self._split_labeled_items(values.get("贡献", ""))
+        limitations = self._split_labeled_items(values.get("局限", ""))
+        tags = self._split_labeled_items(values.get("标签", ""))
+        return {
+            "summary": values.get("摘要", "").strip(),
+            "problem": values.get("问题", ""),
+            "method": values.get("方法", ""),
+            "application": values.get("应用", ""),
+            "results": values.get("结果", ""),
+            "contributions": contributions,
+            "limitations": limitations,
+            "tags": tags,
+            "basis": "llm+pdf+metadata",
+        }
+
+    def _split_labeled_items(self, text: str) -> list[str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return []
+        parts = re.split(r"[；;，,\n]+", raw)
+        return [item.strip(" -•\t") for item in parts if item.strip(" -•\t")]
 
     def _paper_summary_schema(self) -> dict[str, Any]:
         return {

@@ -28,6 +28,9 @@ def run_daemon(
     skip_document_processing: bool = False,
     workers: int = 1,
     since_last_run: bool = False,
+    secondary_priority_only: bool = False,
+    secondary_top_per_topic: int = 3,
+    secondary_min_score: float = 24.0,
 ) -> None:
     loops = 0
     runtime_variants = llm_variants or []
@@ -46,6 +49,9 @@ def run_daemon(
                 use_llm=use_llm,
                 skip_document_processing=skip_document_processing,
                 workers=workers,
+                secondary_priority_only=secondary_priority_only,
+                secondary_top_per_topic=secondary_top_per_topic,
+                secondary_min_score=secondary_min_score,
             )
             if since_last_run and enrich_started_at is not None and not enrichment_stats.errors:
                 db.set_checkpoint(ENRICH_CHECKPOINT_KEY, enrich_started_at)

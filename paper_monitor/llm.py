@@ -48,6 +48,7 @@ class LLMClient:
         self.api_key = self._resolve_api_key()
         self._pdf_input_strategy: str | None = None
         self._pdf_probe_attempted = False
+        self._last_request_failure = ""
         requires_auth = "api.openai.com" in config.base_url or self.provider in {"openai_responses", "openai", "responses"}
         self.enabled = bool(config.enabled and config.base_url and config.model and (self.api_key or not requires_auth))
         if config.enabled and requires_auth and not self.api_key:
@@ -77,11 +78,13 @@ class LLMClient:
                 )
             else:
                 direct_pdf_status = "request_failed"
+                failure_reason = self._consume_last_request_failure()
                 LOGGER.warning(
-                    "llm direct pdf summary failed for paper_id=%s model=%s via %s, fallback to extracted text",
+                    "llm direct pdf summary failed for paper_id=%s model=%s via %s, reason=%s, fallback to extracted text",
                     paper.id,
                     self.config.label or self.config.model or self.config.variant_id,
                     pdf_strategy,
+                    shorten(failure_reason or "unknown", 220),
                 )
         elif pdf_path:
             direct_pdf_status = "unsupported"
@@ -413,6 +416,7 @@ class LLMClient:
         pdf_strategy: str,
         max_output_tokens: int | None = None,
         task_name: str = TASK_PAPER_SUMMARY,
+        allow_repair: bool = True,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         data_url = self._build_pdf_data_url(pdf_path)
         if not data_url:
@@ -446,6 +450,8 @@ class LLMClient:
             return None, usage
         parsed = self._parse_response_json(content)
         if parsed is None:
+            if not allow_repair:
+                return None, self._merge_usage_items([usage])
             repaired, repair_usage = self._repair_response_json(content, schema_name, schema, task_name=TASK_JSON_REPAIR)
             if repaired is not None:
                 return repaired, self._merge_usage_items([usage, repair_usage])
@@ -565,11 +571,15 @@ class LLMClient:
             return None, {}
         choices = data.get("choices", [])
         if not choices:
+            self._last_request_failure = "empty_choices"
             return None, self._parse_usage(data)
         message = choices[0].get("message", {})
         content = message.get("content", "")
         if isinstance(content, list):
             content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+        if not str(content).strip():
+            self._last_request_failure = "empty_content"
+            return None, self._parse_usage(data)
         return str(content), self._parse_usage(data)
 
     def _post_chat_completions_with_pdf(
@@ -623,11 +633,15 @@ class LLMClient:
             return None, {}
         choices = data.get("choices", [])
         if not choices:
+            self._last_request_failure = "empty_choices"
             return None, self._parse_usage(data)
         message = choices[0].get("message", {})
         content = message.get("content", "")
         if isinstance(content, list):
             content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+        if not str(content).strip():
+            self._last_request_failure = "empty_content"
+            return None, self._parse_usage(data)
         return str(content), self._parse_usage(data)
 
     def _post_chat_completions_text_with_pdf(
@@ -676,11 +690,15 @@ class LLMClient:
             return None, {}
         choices = data.get("choices", [])
         if not choices:
+            self._last_request_failure = "empty_choices"
             return None, self._parse_usage(data)
         message = choices[0].get("message", {})
         content = message.get("content", "")
         if isinstance(content, list):
             content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+        if not str(content).strip():
+            self._last_request_failure = "empty_content"
+            return None, self._parse_usage(data)
         return str(content), self._parse_usage(data)
 
     def _post_chat_completions_text(
@@ -706,11 +724,15 @@ class LLMClient:
             return None, {}
         choices = data.get("choices", [])
         if not choices:
+            self._last_request_failure = "empty_choices"
             return None, self._parse_usage(data)
         message = choices[0].get("message", {})
         content = message.get("content", "")
         if isinstance(content, list):
             content = "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+        if not str(content).strip():
+            self._last_request_failure = "empty_content"
+            return None, self._parse_usage(data)
         return str(content), self._parse_usage(data)
 
     def _post_responses(
@@ -856,6 +878,7 @@ class LLMClient:
         *,
         warn_on_error: bool = True,
     ) -> dict[str, Any] | None:
+        self._last_request_failure = ""
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -877,6 +900,7 @@ class LLMClient:
                 if exc.code in RETRYABLE_STATUS_CODES and attempt < 2:
                     time.sleep(1 + attempt)
                     continue
+                self._last_request_failure = f"http_{exc.code}:{shorten(error_body or str(exc), 220)}"
                 if warn_on_error:
                     LOGGER.warning(
                         "llm request failed: status=%s, body=%s",
@@ -889,10 +913,12 @@ class LLMClient:
                 if attempt < 2:
                     time.sleep(1 + attempt)
                     continue
+                self._last_request_failure = str(exc)
                 if warn_on_error:
                     LOGGER.warning("llm request failed: %s", exc)
                 return None
         else:
+            self._last_request_failure = str(last_error or "unknown error")
             if warn_on_error:
                 LOGGER.warning("llm request failed after retries: %s", last_error or "unknown error")
             return None
@@ -900,6 +926,7 @@ class LLMClient:
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
+            self._last_request_failure = "non_json_response"
             LOGGER.warning("llm returned non-json response")
             return None
 
@@ -1041,7 +1068,20 @@ class LLMClient:
         pdf_strategy: str,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         if self.provider not in {"openai_responses", "openai", "responses"}:
-            return self._generate_summary_from_pdf_via_brief(paper, evaluations, pdf_path, pdf_strategy)
+            usage_items: list[dict[str, Any]] = []
+            if self._should_try_pdf_structured_first():
+                parsed, usage = self._generate_summary_from_pdf_via_structured_prompt(
+                    paper,
+                    evaluations,
+                    pdf_path,
+                    pdf_strategy,
+                )
+                usage_items.append(usage)
+                if parsed:
+                    return parsed, self._merge_usage_items(usage_items)
+            parsed, usage = self._generate_summary_from_pdf_via_brief(paper, evaluations, pdf_path, pdf_strategy)
+            usage_items.append(usage)
+            return parsed, self._merge_usage_items(usage_items)
         prefer_compact = self._prefers_compact_mode()
         parsed = None
         usage_items: list[dict[str, Any]] = []
@@ -1116,7 +1156,7 @@ class LLMClient:
             user_prompt=self._build_pdf_brief_prompt(paper, evaluations),
             pdf_path=pdf_path,
             pdf_strategy=pdf_strategy,
-            max_output_tokens=max(self.config.max_output_tokens, 900),
+            max_output_tokens=max(self.config.max_output_tokens, 1200),
             task_name=TASK_PDF_BRIEF,
         )
         usage_items.append(usage)
@@ -1149,6 +1189,56 @@ class LLMClient:
         parsed["basis"] = "llm+pdf+metadata"
         return parsed, self._merge_usage_items(usage_items)
 
+    def _generate_summary_from_pdf_via_structured_prompt(
+        self,
+        paper: PaperRecord,
+        evaluations: list[TopicEvaluation],
+        pdf_path: Path,
+        pdf_strategy: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        usage_items: list[dict[str, Any]] = []
+        parsed, usage = self._request_structured_json_with_pdf(
+            system_prompt=(
+                self._paper_summary_system_prompt()
+                + " 你会同时收到论文完整 PDF 文件。请阅读全文，不要只依赖摘要。"
+                + " 不要输出思考过程，只输出最终 JSON。"
+            ),
+            user_prompt=self._build_pdf_paper_prompt(paper, evaluations, compact=False),
+            schema_name="paper_summary",
+            schema=self._paper_summary_schema(),
+            pdf_path=pdf_path,
+            pdf_strategy=pdf_strategy,
+            max_output_tokens=max(self.config.max_output_tokens, 1400),
+            task_name=TASK_PAPER_SUMMARY,
+            allow_repair=False,
+        )
+        usage_items.append(usage)
+        if not parsed:
+            parsed, usage = self._request_structured_json_with_pdf(
+                system_prompt=(
+                    self._paper_summary_system_prompt()
+                    + " 你会同时收到论文完整 PDF 文件。请阅读全文，不要输出思考过程，只输出最终 JSON。"
+                ),
+                user_prompt=self._build_pdf_paper_prompt(paper, evaluations, compact=True),
+                schema_name="paper_summary",
+                schema=self._paper_summary_schema(),
+                pdf_path=pdf_path,
+                pdf_strategy=pdf_strategy,
+                max_output_tokens=max(self.config.max_output_tokens, 1200),
+                task_name=TASK_PAPER_SUMMARY,
+                allow_repair=False,
+            )
+            usage_items.append(usage)
+        if not parsed:
+            return None, self._merge_usage_items(usage_items)
+
+        parsed["source_mode"] = "pdf_direct"
+        parsed["pdf_input_used"] = True
+        parsed["pdf_filename"] = pdf_path.name
+        parsed["pdf_input_strategy"] = pdf_strategy
+        parsed["direct_pdf_status"] = "used"
+        return parsed, self._merge_usage_items(usage_items)
+
     def _load_fulltext_text(self, paper: PaperRecord) -> str:
         path_text = (paper.fulltext_txt_path or "").strip()
         if not path_text:
@@ -1168,6 +1258,14 @@ class LLMClient:
         if not path.exists() or not path.is_file():
             return None
         return path
+
+    def _should_try_pdf_structured_first(self) -> bool:
+        return not self._is_poe_api()
+
+    def _consume_last_request_failure(self) -> str:
+        value = self._last_request_failure
+        self._last_request_failure = ""
+        return value
 
     def _build_pdf_data_url(self, pdf_path: Path) -> str | None:
         try:

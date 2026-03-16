@@ -432,6 +432,99 @@ class MonitorPipelineTest(unittest.TestCase):
 
             db.close()
 
+    def test_enrichment_workers_apply_to_full_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = FIXTURE_CONFIG_IKUN.read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            settings.llm.enabled = True
+            settings.llm.base_url = "http://example.invalid/v1"
+            settings.llm.model = "dummy-model"
+
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            for index in (1, 2):
+                candidate = PaperCandidate(
+                    source_name="arxiv",
+                    source_paper_id=f"2501.1000{index}",
+                    query_text="all:\"matrix-free\" AND all:\"finite element\"",
+                    title=f"Matrix-Free Finite Element Paper {index}",
+                    abstract="matrix-free finite element operator application on GPUs",
+                    authors=["Alice"],
+                    published_at=f"2026-03-10T0{index}:00:00+08:00",
+                    updated_at=f"2026-03-10T0{index}:00:00+08:00",
+                    primary_url=f"https://arxiv.org/abs/2501.1000{index}",
+                    pdf_url=f"https://arxiv.org/pdf/2501.1000{index}.pdf",
+                    doi="",
+                    arxiv_id=f"2501.1000{index}",
+                    venue="arXiv",
+                    year=2026,
+                    categories=["cs.NA"],
+                    raw={"fixture": True},
+                )
+                pipeline._process_candidate(candidate, RunStats())
+
+            class FakeDocumentProcessor:
+                def can_try_pdf(self, paper):  # noqa: ANN001
+                    return True
+
+                def enrich(self, paper, force=False):  # noqa: ANN001, ARG002
+                    pdf_path = settings.enrichment.pdf_dir / f"{paper.arxiv_id}.pdf"
+                    text_path = settings.enrichment.text_dir / f"{paper.arxiv_id}.txt"
+                    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                    text_path.parent.mkdir(parents=True, exist_ok=True)
+                    pdf_path.write_bytes(b"%PDF-1.4\n")
+                    text_path.write_text(
+                        f"{paper.title} full text with matrix-free operator application and GPU scaling.",
+                        encoding="utf-8",
+                    )
+                    return DocumentArtifacts(
+                        pdf_local_path=str(pdf_path),
+                        pdf_status="downloaded",
+                        pdf_downloaded_at="2026-03-10T10:00:00+08:00",
+                        fulltext_txt_path=str(text_path),
+                        fulltext_excerpt=f"{paper.title} full text excerpt",
+                        fulltext_status="extracted",
+                        page_count=10,
+                        was_downloaded=True,
+                        was_extracted=True,
+                    )
+
+            class FakeLLMClient:
+                enabled = True
+
+                def generate_summary(self, paper, evaluations):  # noqa: ANN001
+                    return LLMResult(
+                        summary_text=f"总结: {paper.title}",
+                        summary_basis="llm+fulltext+metadata",
+                        tags=["matrix-free", "gpu"],
+                        structured={
+                            "summary": paper.title,
+                            "source_mode": "fulltext_txt",
+                            "direct_pdf_status": "request_failed",
+                        },
+                    )
+
+            enrichment_pipeline = EnrichmentPipeline(
+                settings,
+                db,
+                document_processor=FakeDocumentProcessor(),
+                llm_client=FakeLLMClient(),
+            )
+            stats = enrichment_pipeline.run(limit=10, force=False, use_llm=True, workers=2)
+
+            self.assertEqual(stats.enriched, 2)
+            self.assertEqual(stats.downloaded_pdfs, 2)
+            self.assertEqual(stats.extracted_texts, 2)
+            self.assertEqual(stats.llm_summaries, 2)
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM paper_llm_summaries").fetchone()[0], 2)
+            db.close()
+
     def test_enrichment_can_filter_by_created_after(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

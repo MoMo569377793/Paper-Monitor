@@ -7,7 +7,7 @@ import subprocess
 import urllib.error
 import urllib.request
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from paper_monitor.llm import LLMClient
@@ -59,6 +59,14 @@ class DocumentArtifacts:
     page_count: int | None
     was_downloaded: bool
     was_extracted: bool
+
+
+@dataclass(slots=True)
+class PaperProcessingResult:
+    paper: PaperRecord
+    evaluations: list
+    llm_results: list[tuple[LLMRuntimeVariant, object]]
+    artifacts: DocumentArtifacts | None
 
 
 class DocumentProcessor:
@@ -277,11 +285,13 @@ class EnrichmentPipeline:
             secondary_min_score=secondary_min_score,
         )
 
-        if skip_document_processing and use_llm_effective and worker_count > 1:
-            return self._run_llm_only_concurrent(
+        if worker_count > 1 and len(candidates) > 1:
+            return self._run_concurrent(
                 candidates,
                 stats,
                 force=force,
+                use_llm=use_llm_effective,
+                skip_document_processing=skip_document_processing,
                 progress_bar=progress_bar,
                 workers=worker_count,
                 target_variants_by_paper=target_variants_by_paper,
@@ -320,12 +330,14 @@ class EnrichmentPipeline:
         )
         return stats
 
-    def _run_llm_only_concurrent(
+    def _run_concurrent(
         self,
         candidates: list[PaperRecord],
         stats: RunStats,
         *,
         force: bool,
+        use_llm: bool,
+        skip_document_processing: bool,
         progress_bar: ProgressBar,
         workers: int,
         target_variants_by_paper: dict[int, list[LLMRuntimeVariant]],
@@ -337,41 +349,63 @@ class EnrichmentPipeline:
             if self._should_skip(
                 paper,
                 force=force,
-                use_llm=True,
-                skip_document_processing=True,
+                use_llm=use_llm,
+                skip_document_processing=skip_document_processing,
                 target_variants=target_variants,
             ):
                 stats.skipped += 1
                 progress_bar.advance(detail=f"跳过 {title}")
                 continue
             evaluations = self.db.fetch_paper_evaluations(paper.id)
-            existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if not force else set()
+            existing_variant_ids = self.db.fetch_paper_llm_variant_ids(paper.id) if use_llm and not force else set()
             active_variants = [
                 variant
                 for variant in target_variants
-                if variant.client.enabled and (force or variant.variant_id not in existing_variant_ids)
+                if use_llm and variant.client.enabled and (force or variant.variant_id not in existing_variant_ids)
             ]
-            jobs.append((paper, evaluations, active_variants))
+            jobs.append((paper, evaluations, active_variants, title))
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_map = {
-                executor.submit(self._generate_llm_results, paper, evaluations, target_variants): (
+                executor.submit(
+                    self._process_paper_job,
                     paper,
                     evaluations,
+                    active_variants,
+                    force=force,
+                    skip_document_processing=skip_document_processing,
+                    use_llm=use_llm,
+                ): (
+                    paper,
+                    title,
                 )
-                for paper, evaluations, target_variants in jobs
+                for paper, evaluations, active_variants, title in jobs
             }
             for future in as_completed(future_map):
-                paper, evaluations = future_map[future]
-                title = shorten(paper.title, 56)
+                paper, title = future_map[future]
                 try:
-                    llm_results = future.result()
+                    result = future.result()
+                    if result.artifacts is not None:
+                        self.db.update_paper_assets(
+                            paper.id,
+                            pdf_local_path=result.artifacts.pdf_local_path,
+                            pdf_status=result.artifacts.pdf_status,
+                            pdf_downloaded_at=result.artifacts.pdf_downloaded_at,
+                            fulltext_txt_path=result.artifacts.fulltext_txt_path,
+                            fulltext_excerpt=result.artifacts.fulltext_excerpt,
+                            fulltext_status=result.artifacts.fulltext_status,
+                            page_count=result.artifacts.page_count,
+                        )
+                        if result.artifacts.was_downloaded:
+                            stats.downloaded_pdfs += 1
+                        if result.artifacts.was_extracted:
+                            stats.extracted_texts += 1
                     self._persist_paper_results(
-                        paper,
-                        evaluations,
-                        llm_results,
+                        result.paper,
+                        result.evaluations,
+                        result.llm_results,
                         stats,
-                        use_llm=True,
+                        use_llm=use_llm,
                     )
                     progress_bar.advance(detail=f"完成 {title}")
                 except (OSError, subprocess.SubprocessError, urllib.error.URLError) as exc:
@@ -397,6 +431,45 @@ class EnrichmentPipeline:
                 continue
             llm_results.append((variant, llm_result))
         return llm_results
+
+    def _process_paper_job(
+        self,
+        paper: PaperRecord,
+        evaluations,
+        target_variants: list[LLMRuntimeVariant],
+        *,
+        force: bool,
+        skip_document_processing: bool,
+        use_llm: bool,
+    ) -> PaperProcessingResult:
+        updated_paper = paper
+        artifacts: DocumentArtifacts | None = None
+        needs_document_processing = (
+            not skip_document_processing
+            and (force or paper.fulltext_status != "extracted" or paper.pdf_status == "pending")
+        )
+        if needs_document_processing:
+            artifacts = self.document_processor.enrich(paper, force=force)
+            updated_paper = replace(
+                paper,
+                pdf_local_path=artifacts.pdf_local_path,
+                pdf_status=artifacts.pdf_status,
+                pdf_downloaded_at=artifacts.pdf_downloaded_at,
+                fulltext_txt_path=artifacts.fulltext_txt_path,
+                fulltext_excerpt=artifacts.fulltext_excerpt,
+                fulltext_status=artifacts.fulltext_status,
+                page_count=artifacts.page_count,
+            )
+
+        llm_results: list[tuple[LLMRuntimeVariant, object]] = []
+        if use_llm:
+            llm_results = self._generate_llm_results(updated_paper, evaluations, target_variants)
+        return PaperProcessingResult(
+            paper=updated_paper,
+            evaluations=evaluations,
+            llm_results=llm_results,
+            artifacts=artifacts,
+        )
 
     def _persist_paper_results(
         self,

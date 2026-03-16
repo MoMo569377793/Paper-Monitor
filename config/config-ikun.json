@@ -83,7 +83,7 @@
     "timeout_seconds": 180,
     "temperature": 0.2,
     "max_input_chars": 16000,
-    "max_output_tokens": 700,
+    "max_output_tokens": 1200,
     "store": false,
     "enable_topic_digest": true,
     "topic_digest_entry_limit": 8,

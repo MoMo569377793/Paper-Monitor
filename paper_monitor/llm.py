@@ -181,7 +181,7 @@ class LLMClient:
                     user_prompt=self._build_compact_paper_prompt(paper, evaluations),
                     schema_name="paper_summary",
                     schema=self._paper_summary_schema(),
-                    max_output_tokens=max(self.config.max_output_tokens, 1200),
+                    max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_SUMMARY, minimum=1200),
                     task_name=TASK_PAPER_SUMMARY,
                 )
                 if parsed:
@@ -213,7 +213,7 @@ class LLMClient:
                     user_prompt=self._build_compact_paper_prompt(paper, evaluations),
                     schema_name="paper_summary",
                     schema=self._paper_summary_schema(),
-                    max_output_tokens=max(self.config.max_output_tokens, 1200),
+                    max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_SUMMARY, minimum=1200),
                     task_name=TASK_PAPER_SUMMARY,
                 )
                 if parsed:
@@ -275,7 +275,7 @@ class LLMClient:
                 user_prompt=self._build_compact_topic_digest_prompt(topic_name, description, compact_entries),
                 schema_name="topic_digest",
                 schema=self._topic_digest_schema(),
-                max_output_tokens=max(self.config.max_output_tokens, 1400),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_TOPIC_DIGEST, minimum=1400),
                 task_name=TASK_TOPIC_DIGEST,
             )
         if not parsed:
@@ -296,7 +296,7 @@ class LLMClient:
                 user_prompt=user_prompt,
                 schema_name="topic_digest",
                 schema=self._topic_digest_schema(),
-                max_output_tokens=max(self.config.max_output_tokens, 1800),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_TOPIC_DIGEST, minimum=1800),
                 task_name=TASK_TOPIC_DIGEST,
             )
         if not parsed and not prefer_compact:
@@ -309,7 +309,7 @@ class LLMClient:
                 user_prompt=self._build_compact_topic_digest_prompt(topic_name, description, compact_entries),
                 schema_name="topic_digest",
                 schema=self._topic_digest_schema(),
-                max_output_tokens=max(self.config.max_output_tokens, 1400),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_TOPIC_DIGEST, minimum=1400),
                 task_name=TASK_TOPIC_DIGEST,
             )
         if not parsed:
@@ -356,6 +356,21 @@ class LLMClient:
         if global_value:
             return global_value
         return str(self.config.extra_body.get("output_effort", "")).strip()
+
+    def _max_output_tokens_for_task(
+        self,
+        task_name: str,
+        *,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> int:
+        raw_value = self.config.max_output_tokens_by_task.get(task_name, self.config.max_output_tokens)
+        value = int(raw_value)
+        if minimum is not None:
+            value = max(value, int(minimum))
+        if maximum is not None:
+            value = min(value, int(maximum))
+        return value
 
     def _is_poe_api(self) -> bool:
         return "api.poe.com" in self.config.base_url.lower()
@@ -726,7 +741,7 @@ class LLMClient:
                 repair_user,
                 schema_name,
                 schema,
-                max_output_tokens=max(self.config.max_output_tokens, 1000),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_JSON_REPAIR, minimum=1000),
                 task_name=task_name,
             )
         else:
@@ -735,7 +750,7 @@ class LLMClient:
                 repair_user,
                 schema_name,
                 schema,
-                max_output_tokens=max(self.config.max_output_tokens, 1000),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_JSON_REPAIR, minimum=1000),
                 task_name=task_name,
             )
         if not repaired_text:
@@ -763,7 +778,11 @@ class LLMClient:
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
-            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt_with_schema},
@@ -823,7 +842,11 @@ class LLMClient:
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
-            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "messages": [
                 {
                     "role": "user",
@@ -877,7 +900,11 @@ class LLMClient:
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
-            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "messages": [
                 {
                     "role": "user",
@@ -916,7 +943,11 @@ class LLMClient:
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
-            "max_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -954,7 +985,11 @@ class LLMClient:
             "instructions": system_prompt,
             "input": user_prompt,
             "temperature": self.config.temperature,
-            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_output_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "store": self.config.store,
             "text": {
                 "format": {
@@ -1000,7 +1035,11 @@ class LLMClient:
                 }
             ],
             "temperature": self.config.temperature,
-            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_output_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "store": self.config.store,
             "text": {
                 "format": {
@@ -1030,7 +1069,11 @@ class LLMClient:
             "instructions": system_prompt,
             "input": user_prompt,
             "temperature": self.config.temperature,
-            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_output_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "store": self.config.store,
         }
         payload = self._apply_responses_request_options(payload, task_name=task_name)
@@ -1066,7 +1109,11 @@ class LLMClient:
                 }
             ],
             "temperature": self.config.temperature,
-            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "max_output_tokens": (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._max_output_tokens_for_task(task_name)
+            ),
             "store": self.config.store,
         }
         payload = self._apply_responses_request_options(payload, task_name=task_name)
@@ -1238,7 +1285,11 @@ class LLMClient:
                     chunk_index=chunk_index,
                     chunk_total=len(chunks),
                 ),
-                max_output_tokens=max(600, min(self.config.max_output_tokens, 900)),
+                max_output_tokens=self._max_output_tokens_for_task(
+                    TASK_PAPER_CHUNK,
+                    minimum=600,
+                    maximum=900,
+                ),
                 task_name=TASK_PAPER_CHUNK,
             )
             usage_items.append(usage)
@@ -1253,7 +1304,7 @@ class LLMClient:
             user_prompt=self._build_paper_reduce_prompt(paper, evaluations, chunk_notes),
             schema_name="paper_summary",
             schema=self._paper_summary_schema(),
-            max_output_tokens=max(self.config.max_output_tokens, 1200),
+            max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_REDUCE, minimum=1200),
             task_name=TASK_PAPER_REDUCE,
         )
         usage_items.append(usage)
@@ -1300,7 +1351,7 @@ class LLMClient:
                 schema=self._paper_summary_schema(),
                 pdf_path=pdf_path,
                 pdf_strategy=pdf_strategy,
-                max_output_tokens=max(self.config.max_output_tokens, 1200),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_SUMMARY, minimum=1200),
                 task_name=TASK_PAPER_SUMMARY,
             )
             usage_items.append(usage)
@@ -1315,7 +1366,7 @@ class LLMClient:
                 schema=self._paper_summary_schema(),
                 pdf_path=pdf_path,
                 pdf_strategy=pdf_strategy,
-                max_output_tokens=max(self.config.max_output_tokens, 1400),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_SUMMARY, minimum=1400),
                 task_name=TASK_PAPER_SUMMARY,
             )
             usage_items.append(usage)
@@ -1330,7 +1381,7 @@ class LLMClient:
                 schema=self._paper_summary_schema(),
                 pdf_path=pdf_path,
                 pdf_strategy=pdf_strategy,
-                max_output_tokens=max(self.config.max_output_tokens, 1200),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_SUMMARY, minimum=1200),
                 task_name=TASK_PAPER_SUMMARY,
             )
             usage_items.append(usage)
@@ -1363,7 +1414,7 @@ class LLMClient:
             user_prompt=self._build_pdf_brief_prompt(paper, evaluations),
             pdf_path=pdf_path,
             pdf_strategy=pdf_strategy,
-            max_output_tokens=max(self.config.max_output_tokens, 1200),
+            max_output_tokens=self._max_output_tokens_for_task(TASK_PDF_BRIEF, minimum=1200),
             task_name=TASK_PDF_BRIEF,
         )
         usage_items.append(usage)
@@ -1384,7 +1435,7 @@ class LLMClient:
                 user_prompt=self._build_pdf_brief_repair_prompt(paper, evaluations, brief_text),
                 schema_name="paper_summary",
                 schema=self._paper_summary_schema(),
-                max_output_tokens=max(self.config.max_output_tokens, 900),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_JSON_REPAIR, minimum=900),
                 task_name=TASK_JSON_REPAIR,
             )
             usage_items.append(usage)
@@ -1421,7 +1472,7 @@ class LLMClient:
             schema=self._paper_summary_schema(),
             pdf_path=pdf_path,
             pdf_strategy=pdf_strategy,
-            max_output_tokens=max(self.config.max_output_tokens, 1400),
+            max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_SUMMARY, minimum=1400),
             task_name=TASK_PAPER_SUMMARY,
             allow_repair=False,
         )
@@ -1437,7 +1488,7 @@ class LLMClient:
                 schema=self._paper_summary_schema(),
                 pdf_path=pdf_path,
                 pdf_strategy=pdf_strategy,
-                max_output_tokens=max(self.config.max_output_tokens, 1200),
+                max_output_tokens=self._max_output_tokens_for_task(TASK_PAPER_SUMMARY, minimum=1200),
                 task_name=TASK_PAPER_SUMMARY,
                 allow_repair=False,
             )

@@ -72,7 +72,7 @@
     "api_key_env": "POE_API_KEY",
     "model": "claude-opus-4.6",
     "model_reasoning_effort": "",
-    "model_output_effort": "",
+    "model_output_effort": "max",
     "output_effort_by_task": {
       "pdf_brief": "max",
       "paper_summary": "max",
@@ -85,6 +85,14 @@
     "temperature": 0.2,
     "max_input_chars": 16000,
     "max_output_tokens": 1800,
+    "max_output_tokens_by_task": {
+      "pdf_brief": 1800,
+      "paper_summary": 2000,
+      "paper_chunk": 800,
+      "paper_reduce": 2000,
+      "topic_digest": 2400,
+      "json_repair": 1000
+    },
     "store": false,
     "enable_topic_digest": true,
     "topic_digest_entry_limit": 12,

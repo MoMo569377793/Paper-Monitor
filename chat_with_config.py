@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config/config-poe.json", help="配置文件路径")
     parser.add_argument("--system", default=DEFAULT_SYSTEM_PROMPT, help="系统提示词")
     parser.add_argument("--message", help="单次提问；不传则进入交互式模式")
-    parser.add_argument("--max-output-tokens", type=int, help="覆盖配置中的输出 token 上限")
+    parser.add_argument("--max-output-tokens", type=int, help="显式指定输出 token 上限；默认不向后端发送该字段")
     parser.add_argument("--temperature", type=float, help="覆盖配置中的 temperature")
     parser.add_argument(
         "--reasoning-effort",
@@ -146,6 +146,15 @@ def map_reasoning_effort_to_poe_thinking_level(reasoning_effort: str) -> str:
     return "low"
 
 
+def map_reasoning_effort_to_poe_output_effort(reasoning_effort: str) -> str:
+    value = reasoning_effort.strip().lower()
+    if not value:
+        return ""
+    if value in {"low", "medium", "high", "xhigh", "max"}:
+        return "max" if value in {"xhigh", "max"} else value
+    return value
+
+
 def is_claude_model(model: str) -> bool:
     return model.strip().lower().startswith("claude")
 
@@ -191,7 +200,7 @@ def call_model(
 
     headers = build_headers(api_key)
     chosen_temperature = temperature if temperature is not None else float(llm.get("temperature", 0.2))
-    chosen_max_tokens = max_output_tokens if max_output_tokens is not None else int(llm.get("max_output_tokens", 700))
+    chosen_max_tokens = max_output_tokens
     chosen_reasoning_effort = (
         reasoning_effort
         if reasoning_effort is not None
@@ -212,9 +221,10 @@ def call_model(
             "instructions": system_prompt,
             "input": transcript,
             "temperature": chosen_temperature,
-            "max_output_tokens": chosen_max_tokens,
             "store": bool(llm.get("store", False)),
         }
+        if chosen_max_tokens is not None:
+            payload["max_output_tokens"] = chosen_max_tokens
         if chosen_reasoning_effort:
             payload["reasoning"] = {"effort": chosen_reasoning_effort}
         if verbose:
@@ -239,9 +249,10 @@ def call_model(
     payload = {
         "model": model,
         "temperature": chosen_temperature,
-        "max_tokens": chosen_max_tokens,
         "messages": payload_messages,
     }
+    if chosen_max_tokens is not None:
+        payload["max_tokens"] = chosen_max_tokens
     if is_poe_api:
         extra_body = llm.get("extra_body", {})
         if not isinstance(extra_body, dict):
@@ -256,7 +267,11 @@ def call_model(
             if thinking_level:
                 extra_body["thinking_level"] = thinking_level
         elif is_claude_model(model):
-            output_effort = chosen_output_effort or str(extra_body.get("output_effort", "")).strip()
+            output_effort = (
+                chosen_output_effort
+                or str(extra_body.get("output_effort", "")).strip()
+                or map_reasoning_effort_to_poe_output_effort(chosen_reasoning_effort)
+            )
             if output_effort:
                 extra_body["output_effort"] = output_effort
             extra_body.pop("reasoning_effort", None)

@@ -71,7 +71,7 @@
     "base_url": "https://api.ikuncode.cc/v1",
     "api_key_env": "IKUNCODE_API_KEY",
     "model": "gpt-5.4",
-    "model_reasoning_effort": "",
+    "model_reasoning_effort": "xhigh",
     "reasoning_by_task": {
       "pdf_brief": "xhigh",
       "paper_summary": "xhigh",
@@ -84,6 +84,14 @@
     "temperature": 0.2,
     "max_input_chars": 16000,
     "max_output_tokens": 1600,
+    "max_output_tokens_by_task": {
+      "pdf_brief": 1600,
+      "paper_summary": 1800,
+      "paper_chunk": 800,
+      "paper_reduce": 1800,
+      "topic_digest": 2200,
+      "json_repair": 1000
+    },
     "store": false,
     "enable_topic_digest": true,
     "topic_digest_entry_limit": 12,

@@ -359,6 +359,14 @@ def _build_llm_config(raw: dict, *, config_stem: str, index: int, primary: bool)
         thinking_level_by_task=(
             dict(raw.get("thinking_level_by_task", {})) if isinstance(raw.get("thinking_level_by_task", {}), dict) else {}
         ),
+        max_output_tokens_by_task=(
+            {
+                str(key): int(value)
+                for key, value in dict(raw.get("max_output_tokens_by_task", {})).items()
+            }
+            if isinstance(raw.get("max_output_tokens_by_task", {}), dict)
+            else {}
+        ),
         enable_topic_digest=bool(raw.get("enable_topic_digest", False)),
         topic_digest_entry_limit=int(raw.get("topic_digest_entry_limit", 8)),
         fulltext_chunk_chars=int(raw.get("fulltext_chunk_chars", 10000)),

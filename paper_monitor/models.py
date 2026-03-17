@@ -83,6 +83,7 @@ class LLMConfig:
     reasoning_by_task: dict[str, str] = field(default_factory=dict)
     output_effort_by_task: dict[str, str] = field(default_factory=dict)
     thinking_level_by_task: dict[str, str] = field(default_factory=dict)
+    max_output_tokens_by_task: dict[str, int] = field(default_factory=dict)
     enable_topic_digest: bool = False
     topic_digest_entry_limit: int = 8
     fulltext_chunk_chars: int = 10000

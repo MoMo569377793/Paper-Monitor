@@ -29,7 +29,7 @@ def normalize_title(text: str) -> str:
 
 
 def keyword_in_text(keyword: str, text: str) -> bool:
-    normalized_keyword = normalize_whitespace(keyword).lower()
+    normalized_keyword = normalize_title(keyword)
     return normalized_keyword in text
 
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import logging
+import os
 import re
 import subprocess
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass, replace
@@ -97,6 +101,7 @@ class DocumentProcessor:
         self.config = config
         self.user_agent = user_agent
         self.timezone_name = timezone_name
+        self.semantic_scholar_api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "").strip()
         self.has_pdftotext = bool(config.use_pdftotext and command_exists("pdftotext"))
         self.has_pdfinfo = command_exists("pdfinfo")
         ensure_directory(config.pdf_dir)
@@ -115,6 +120,12 @@ class DocumentProcessor:
             return f"https://arxiv.org/pdf/{paper.arxiv_id}.pdf"
         if "/abs/" in paper.primary_url and "arxiv.org" in paper.primary_url:
             return paper.primary_url.replace("/abs/", "/pdf/") + ".pdf"
+        inferred_landing_pdf = self._infer_pdf_url_from_landing_page(paper.primary_url)
+        if inferred_landing_pdf:
+            return inferred_landing_pdf
+        inferred_semantic_scholar_pdf = self._infer_pdf_url_from_semantic_scholar(paper)
+        if inferred_semantic_scholar_pdf:
+            return inferred_semantic_scholar_pdf
         if self._should_try_primary_url_as_pdf_candidate(paper):
             return paper.primary_url.strip()
         return ""
@@ -144,7 +155,7 @@ class DocumentProcessor:
             try:
                 self._download_pdf(pdf_url, pdf_path)
                 was_downloaded = True
-            except ValueError as exc:
+            except (ValueError, urllib.error.URLError, OSError) as exc:
                 LOGGER.warning("pdf candidate rejected for paper_id=%s url=%s: %s", paper.id, pdf_url, exc)
                 return DocumentArtifacts(
                     pdf_local_path=paper.pdf_local_path,
@@ -238,6 +249,143 @@ class DocumentProcessor:
             if not payload.startswith(b"%PDF") and "application/pdf" not in content_type:
                 raise ValueError(f"candidate url did not return a pdf document: {url}")
             destination.write_bytes(payload)
+
+    def _infer_pdf_url_from_landing_page(self, url: str) -> str:
+        target = url.strip()
+        if not target:
+            return ""
+        lowered = target.lower()
+        if self._looks_like_pdf_url(lowered):
+            return target
+        request = urllib.request.Request(target, headers={"User-Agent": self.user_agent})
+        try:
+            with urllib.request.urlopen(request, timeout=self.config.download_timeout_seconds) as response:
+                content_type = (response.headers.get("Content-Type") or "").lower()
+                if "html" not in content_type:
+                    return ""
+                final_url = response.geturl() or target
+                body = response.read(512_000).decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            return ""
+        candidates = [
+            r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']dc\.identifier["\'][^>]+content=["\']([^"\']+\.pdf[^"\']*)["\']',
+            r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+\.pdf[^"\']*)["\']',
+            r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']',
+        ]
+        for pattern in candidates:
+            for match in re.finditer(pattern, body, re.I):
+                candidate = urllib.parse.urljoin(final_url, match.group(1).strip())
+                if self._looks_like_pdf_url(candidate):
+                    return candidate
+        return ""
+
+    def _infer_pdf_url_from_semantic_scholar(self, paper: PaperRecord) -> str:
+        fields = "title,openAccessPdf,url,externalIds"
+        for identifier in self._semantic_scholar_identifiers(paper):
+            payload = self._fetch_semantic_scholar_details(identifier, fields)
+            candidate = self._semantic_scholar_open_access_pdf(payload)
+            if candidate:
+                LOGGER.info(
+                    "resolved pdf via Semantic Scholar details for paper_id=%s using %s",
+                    paper.id,
+                    identifier,
+                )
+                return candidate
+        if not self.semantic_scholar_api_key:
+            return ""
+        payload = self._search_semantic_scholar_by_title(paper.title, fields)
+        candidate = self._semantic_scholar_open_access_pdf(payload)
+        if candidate:
+            LOGGER.info(
+                "resolved pdf via Semantic Scholar title search for paper_id=%s",
+                paper.id,
+            )
+            return candidate
+        return ""
+
+    def _semantic_scholar_identifiers(self, paper: PaperRecord) -> list[str]:
+        identifiers: list[str] = []
+        if paper.doi:
+            identifiers.append(f"DOI:{paper.doi.strip()}")
+        inferred_arxiv_id = self._infer_arxiv_id(paper)
+        if inferred_arxiv_id:
+            identifiers.append(f"ARXIV:{re.sub(r'v\\d+$', '', inferred_arxiv_id, flags=re.I)}")
+        elif paper.arxiv_id:
+            identifiers.append(f"ARXIV:{re.sub(r'v\\d+$', '', paper.arxiv_id.strip(), flags=re.I)}")
+        return identifiers
+
+    def _semantic_scholar_headers(self) -> dict[str, str]:
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+        }
+        if self.semantic_scholar_api_key:
+            headers["x-api-key"] = self.semantic_scholar_api_key
+        return headers
+
+    def _fetch_semantic_scholar_details(self, identifier: str, fields: str) -> dict:
+        encoded_identifier = urllib.parse.quote(identifier, safe="")
+        url = (
+            f"https://api.semanticscholar.org/graph/v1/paper/{encoded_identifier}"
+            f"?fields={urllib.parse.quote(fields, safe=',')}"
+        )
+        for attempt in range(3):
+            request = urllib.request.Request(url, headers=self._semantic_scholar_headers())
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.download_timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8", errors="replace"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    return {}
+                if exc.code == 429 and attempt < 2:
+                    time.sleep(1.0 + attempt)
+                    continue
+                LOGGER.info(
+                    "Semantic Scholar details lookup failed for %s: http_%s",
+                    identifier,
+                    exc.code,
+                )
+                return {}
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.info("Semantic Scholar details lookup failed for %s: %s", identifier, exc)
+                return {}
+        return {}
+
+    def _search_semantic_scholar_by_title(self, title: str, fields: str) -> dict:
+        query = urllib.parse.quote(title.strip())
+        url = (
+            "https://api.semanticscholar.org/graph/v1/paper/search"
+            f"?query={query}&limit=1&fields={urllib.parse.quote(fields, safe=',')}"
+        )
+        payload = {}
+        for attempt in range(3):
+            request = urllib.request.Request(url, headers=self._semantic_scholar_headers())
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.download_timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt < 2:
+                    time.sleep(1.0 + attempt)
+                    continue
+                LOGGER.info("Semantic Scholar title search failed for %r: http_%s", title, exc.code)
+                return {}
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.info("Semantic Scholar title search failed for %r: %s", title, exc)
+                return {}
+        data = payload.get("data")
+        if isinstance(data, list) and data:
+            return data[0] if isinstance(data[0], dict) else {}
+        return {}
+
+    def _semantic_scholar_open_access_pdf(self, payload: dict) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        candidate = str((payload.get("openAccessPdf") or {}).get("url") or "").strip()
+        if candidate and candidate.lower().startswith(("http://", "https://")):
+            return candidate
+        return ""
 
     def _extract_page_count(self, pdf_path: Path) -> int | None:
         if not self.has_pdfinfo:

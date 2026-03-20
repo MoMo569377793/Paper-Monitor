@@ -11,6 +11,7 @@ class TopicConfig:
     display_name: str
     description: str
     source_queries: dict[str, list[str]]
+    required_keyword_groups: list[list[str]] = field(default_factory=list)
     must_match_groups: list[list[str]] = field(default_factory=list)
     positive_keywords: list[str] = field(default_factory=list)
     exclude_keywords: list[str] = field(default_factory=list)
@@ -19,6 +20,22 @@ class TopicConfig:
     dblp_venue_keywords: list[str] = field(default_factory=list)
     priority_venue_keywords: list[str] = field(default_factory=list)
     threshold: float = 18.0
+    seed_papers: list["SeedPaperConfig"] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SeedPaperConfig:
+    title: str
+    authors: list[str] = field(default_factory=list)
+    year: int | None = None
+    venue: str = ""
+    abstract: str = ""
+    primary_url: str = ""
+    pdf_url: str = ""
+    doi: str = ""
+    arxiv_id: str = ""
+    categories: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

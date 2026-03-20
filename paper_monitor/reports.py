@@ -58,6 +58,120 @@ def _catalog_topic_sentence(entries: list[ReportEntry]) -> str:
     return f"当前数据库中共有 {len(entries)} 篇论文。"
 
 
+def _entry_sort_key(entry: ReportEntry) -> tuple[float, str, int]:
+    paper = entry.paper
+    published = paper.published_at or paper.created_at or ""
+    return (float(entry.score), published, int(paper.id))
+
+
+def _sorted_entries(entries: list[ReportEntry]) -> list[ReportEntry]:
+    return sorted(entries, key=_entry_sort_key, reverse=True)
+
+
+def _fallback_review_window_days(report_type: str, topic_id: str) -> int:
+    if topic_id == "matrix_free_fem":
+        return 90
+    if topic_id == "ai_operator_acceleration":
+        return 30
+    return 30 if report_type == "daily" else 90
+
+
+def _append_report_entry_markdown(
+    lines: list[str],
+    entry: ReportEntry,
+    index: int,
+    paper_summaries_by_paper: dict[int, list[PaperLLMSummary]],
+    variants: list[LLMRuntimeVariant | dict],
+) -> None:
+    paper = entry.paper
+    lines.append(f"### {index}. {paper.title}")
+    lines.append("")
+    lines.append(f"- 相关性：`{entry.classification}` / 分数 `{entry.score}`")
+    lines.append(f"- 来源：`{', '.join(entry.source_names) or paper.source_first}`")
+    lines.append(f"- 发布时间：`{paper.published_at or '未知'}`")
+    lines.append(f"- Venue / 分类：`{paper.venue or '未知'}` / `{', '.join(paper.categories) or '无'}`")
+    lines.append(
+        f"- 全文状态：`{paper.fulltext_status}` / PDF `{paper.pdf_status}` / "
+        f"页数 `{paper.page_count or '未知'}` / 总结来源 `{paper.summary_basis or '未知'}`"
+    )
+    lines.append(f"- 匹配词：`{', '.join(entry.matched_keywords) or '无'}`")
+    lines.append(f"- 链接：{paper.primary_url or (entry.source_urls[0] if entry.source_urls else '无')}")
+    paper_stem = _paper_report_stem(paper)
+    lines.append(f"- 单篇报告：`reports/papers/{paper_stem}.md` / `reports/papers/{paper_stem}.html`")
+    if paper.pdf_local_path:
+        lines.append(f"- 本地 PDF：`{paper.pdf_local_path}`")
+    if paper.fulltext_txt_path:
+        lines.append(f"- 全文文本：`{paper.fulltext_txt_path}`")
+    lines.append(f"- 默认总结：{paper.summary_text}")
+    lines.append("#### 多模型摘要")
+    lines.extend(_render_summary_lines(variants, paper_summaries_by_paper.get(paper.id, [])))
+    lines.append("")
+    if paper.fulltext_excerpt:
+        lines.append(f"- 全文节选：{shorten(paper.fulltext_excerpt, 320)}")
+    elif paper.abstract:
+        lines.append(f"- 摘要片段：{shorten(paper.abstract, 320)}")
+    lines.append("")
+
+
+def _render_report_entry_html(
+    entry: ReportEntry,
+    paper_summaries_by_paper: dict[int, list[PaperLLMSummary]],
+    variants: list[LLMRuntimeVariant | dict],
+) -> str:
+    paper = entry.paper
+    return f"""
+                <article class="paper-card">
+                  <h3>{html.escape(paper.title)}</h3>
+                  <p class="meta">相关性 {entry.classification} / 分数 {entry.score} / 来源 {html.escape(', '.join(entry.source_names) or paper.source_first)}</p>
+                  <p class="meta">发布时间 {html.escape(paper.published_at or '未知')} / Venue {html.escape(paper.venue or '未知')}</p>
+                  <p class="meta">全文状态 {html.escape(paper.fulltext_status)} / PDF {html.escape(paper.pdf_status)} / 页数 {html.escape(str(paper.page_count or '未知'))} / 总结来源 {html.escape(paper.summary_basis or '未知')}</p>
+                  <p class="meta">单篇报告 reports/papers/{html.escape(_paper_report_stem(paper))}.html</p>
+                  <div class="paper-grid">
+                    <div class="paper-panel">
+                      <p><strong>匹配词：</strong>{html.escape(', '.join(entry.matched_keywords) or '无')}</p>
+                      <p><strong>默认总结：</strong>{html.escape(paper.summary_text)}</p>
+                    </div>
+                    <div class="paper-panel">
+                      <p><strong>{'全文节选' if paper.fulltext_excerpt else '摘要片段'}：</strong>{html.escape(shorten(paper.fulltext_excerpt or paper.abstract or '无摘要', 360))}</p>
+                    </div>
+                  </div>
+                  <div class="llm-summary-section">
+                    <p><strong>多模型摘要：</strong></p>
+                    {_render_summary_html(variants, paper_summaries_by_paper.get(paper.id, []))}
+                  </div>
+                  <p><a href="{html.escape(paper.primary_url or (entry.source_urls[0] if entry.source_urls else '#'))}">打开原始链接</a></p>
+                </article>
+                """
+
+
+def _collect_fallback_review_entries(
+    db: Database,
+    settings: Settings,
+    report_type: str,
+    report_date: str,
+    grouped_entries: dict[str, list[ReportEntry]],
+) -> tuple[dict[str, list[ReportEntry]], dict[str, int]]:
+    fallback_entries_by_topic: dict[str, list[ReportEntry]] = {}
+    fallback_days_by_topic: dict[str, int] = {}
+    for topic in settings.topics:
+        if grouped_entries.get(topic.id):
+            continue
+        days = _fallback_review_window_days(report_type, topic.id)
+        start_at, end_at = to_day_bounds(report_date, settings.timezone, days)
+        entries = db.fetch_recent_topic_entries(
+            topic.id,
+            start_at,
+            end_at,
+            include_maybe=False,
+            limit=settings.report.top_n_per_topic,
+        )
+        sorted_entries = _sorted_entries(entries)
+        if sorted_entries:
+            fallback_entries_by_topic[topic.id] = sorted_entries
+            fallback_days_by_topic[topic.id] = days
+    return fallback_entries_by_topic, fallback_days_by_topic
+
+
 def _single_runtime_variant(settings: Settings, llm_client: LLMClient) -> LLMRuntimeVariant:
     return LLMRuntimeVariant(
         variant_id=settings.llm.variant_id,
@@ -88,7 +202,7 @@ def _collect_topic_digests_by_variant(
             continue
         topic_digests: dict[str, dict] = {}
         for topic in settings.topics:
-            topic_entries = grouped_entries.get(topic.id, [])
+            topic_entries = _sorted_entries(grouped_entries.get(topic.id, []))
             prepared_entries, digest_input_meta = _prepare_digest_entries_for_variant(
                 topic_entries,
                 paper_summaries_by_paper,
@@ -821,9 +935,11 @@ def _render_markdown(
     start_at: str,
     end_at: str,
     grouped_entries: dict[str, list[ReportEntry]],
+    fallback_entries_by_topic: dict[str, list[ReportEntry]],
+    fallback_days_by_topic: dict[str, int],
     paper_summaries_by_paper: dict[int, list[PaperLLMSummary]],
     topic_digests_by_variant: dict[str, dict[str, dict]],
-    variants: list[LLMRuntimeVariant],
+    variants: list[LLMRuntimeVariant | dict],
     settings: Settings,
 ) -> str:
     total = sum(len(items) for items in grouped_entries.values())
@@ -840,7 +956,9 @@ def _render_markdown(
     ]
 
     for topic in settings.topics:
-        entries = grouped_entries.get(topic.id, [])
+        entries = _sorted_entries(grouped_entries.get(topic.id, []))
+        fallback_entries = _sorted_entries(fallback_entries_by_topic.get(topic.id, []))
+        fallback_days = fallback_days_by_topic.get(topic.id)
         lines.append(f"## {topic.display_name}")
         lines.append("")
         lines.append(topic.description)
@@ -848,61 +966,44 @@ def _render_markdown(
         lines.append(f"- 命中数量：`{len(entries)}`")
         lines.append(f"- 趋势摘要：{_topic_trend_sentence(entries)}")
         for variant in variants:
-            digest = topic_digests_by_variant.get(variant.variant_id, {}).get(topic.id)
+            variant_id = str(_variant_attr(variant, "variant_id") or "")
+            variant_label = str(_variant_attr(variant, "label") or variant_id or "未知模型")
+            digest = topic_digests_by_variant.get(variant_id, {}).get(topic.id)
             if not digest:
-                lines.append(f"- {variant.label} 主题概览：未生成")
+                lines.append(f"- {variant_label} 主题概览：未生成")
                 continue
-            lines.append(f"- {variant.label} 主题概览：{digest.get('overview', '')}")
+            lines.append(f"- {variant_label} 主题概览：{digest.get('overview', '')}")
             for meta_line in _digest_input_meta_lines(digest):
-                lines.append(f"- {variant.label} {meta_line[2:]}" if meta_line.startswith("- ") else f"- {variant.label} {meta_line}")
+                lines.append(f"- {variant_label} {meta_line[2:]}" if meta_line.startswith("- ") else f"- {variant_label} {meta_line}")
             highlights = digest.get("highlights", [])
             if highlights:
-                lines.append(f"- {variant.label} 关键观察：`{' | '.join(highlights[:3])}`")
+                lines.append(f"- {variant_label} 关键观察：`{' | '.join(highlights[:3])}`")
             watchlist = digest.get("watchlist", [])
             if watchlist:
-                lines.append(f"- {variant.label} 建议关注：`{' | '.join(watchlist[:3])}`")
+                lines.append(f"- {variant_label} 建议关注：`{' | '.join(watchlist[:3])}`")
             usage = digest.get("usage", {})
             if usage:
                 lines.append(
-                    f"- {variant.label} Token：in `{usage.get('input_tokens', '未知')}` / "
+                    f"- {variant_label} Token：in `{usage.get('input_tokens', '未知')}` / "
                     f"out `{usage.get('output_tokens', '未知')}` / total `{usage.get('total_tokens', '未知')}`"
                 )
         lines.append("")
 
         if not entries:
-            lines.append("本窗口内没有新记录。")
+            lines.append("本窗口内没有新的严格命中论文。")
+            lines.append("")
+            if fallback_entries and fallback_days:
+                lines.append(f"- 自动补充：近 `{fallback_days}` 天高分回顾（按相关性分数降序）")
+                lines.append("")
+                for index, entry in enumerate(fallback_entries[: settings.report.top_n_per_topic], start=1):
+                    _append_report_entry_markdown(lines, entry, index, paper_summaries_by_paper, variants)
+            else:
+                lines.append("在补充回顾窗口内也没有可展示的严格命中论文。")
             lines.append("")
             continue
 
         for index, entry in enumerate(entries[: settings.report.top_n_per_topic], start=1):
-            paper = entry.paper
-            lines.append(f"### {index}. {paper.title}")
-            lines.append("")
-            lines.append(f"- 相关性：`{entry.classification}` / 分数 `{entry.score}`")
-            lines.append(f"- 来源：`{', '.join(entry.source_names) or paper.source_first}`")
-            lines.append(f"- 发布时间：`{paper.published_at or '未知'}`")
-            lines.append(f"- Venue / 分类：`{paper.venue or '未知'}` / `{', '.join(paper.categories) or '无'}`")
-            lines.append(
-                f"- 全文状态：`{paper.fulltext_status}` / PDF `{paper.pdf_status}` / "
-                f"页数 `{paper.page_count or '未知'}` / 总结来源 `{paper.summary_basis or '未知'}`"
-            )
-            lines.append(f"- 匹配词：`{', '.join(entry.matched_keywords) or '无'}`")
-            lines.append(f"- 链接：{paper.primary_url or (entry.source_urls[0] if entry.source_urls else '无')}")
-            paper_stem = _paper_report_stem(paper)
-            lines.append(f"- 单篇报告：`reports/papers/{paper_stem}.md` / `reports/papers/{paper_stem}.html`")
-            if paper.pdf_local_path:
-                lines.append(f"- 本地 PDF：`{paper.pdf_local_path}`")
-            if paper.fulltext_txt_path:
-                lines.append(f"- 全文文本：`{paper.fulltext_txt_path}`")
-            lines.append(f"- 默认总结：{paper.summary_text}")
-            lines.append("#### 多模型摘要")
-            lines.extend(_render_summary_lines(variants, paper_summaries_by_paper.get(paper.id, [])))
-            lines.append("")
-            if paper.fulltext_excerpt:
-                lines.append(f"- 全文节选：{shorten(paper.fulltext_excerpt, 320)}")
-            elif paper.abstract:
-                lines.append(f"- 摘要片段：{shorten(paper.abstract, 320)}")
-            lines.append("")
+            _append_report_entry_markdown(lines, entry, index, paper_summaries_by_paper, variants)
 
     return "\n".join(lines).strip() + "\n"
 
@@ -913,22 +1014,28 @@ def _render_html(
     start_at: str,
     end_at: str,
     grouped_entries: dict[str, list[ReportEntry]],
+    fallback_entries_by_topic: dict[str, list[ReportEntry]],
+    fallback_days_by_topic: dict[str, int],
     paper_summaries_by_paper: dict[int, list[PaperLLMSummary]],
     topic_digests_by_variant: dict[str, dict[str, dict]],
-    variants: list[LLMRuntimeVariant],
+    variants: list[LLMRuntimeVariant | dict],
     settings: Settings,
 ) -> str:
     label = _report_label(report_type)
     sections: list[str] = []
     for topic in settings.topics:
-        entries = grouped_entries.get(topic.id, [])
+        entries = _sorted_entries(grouped_entries.get(topic.id, []))
+        fallback_entries = _sorted_entries(fallback_entries_by_topic.get(topic.id, []))
+        fallback_days = fallback_days_by_topic.get(topic.id)
         digest_cards: list[str] = []
         for variant in variants:
-            digest = topic_digests_by_variant.get(variant.variant_id, {}).get(topic.id, {})
+            variant_id = str(_variant_attr(variant, "variant_id") or "")
+            variant_label = str(_variant_attr(variant, "label") or variant_id or "未知模型")
+            digest = topic_digests_by_variant.get(variant_id, {}).get(topic.id, {})
             digest_cards.append(
                 f"""
                 <article class="topic-digest-card">
-                  <p class="meta">模型 {html.escape(variant.label)}</p>
+                  <p class="meta">模型 {html.escape(variant_label)}</p>
                   <p><strong>主题概览：</strong>{html.escape(digest.get('overview', '未生成'))}</p>
                   {_digest_input_meta_html(digest)}
                   {f"<p><strong>关键观察：</strong>{html.escape(' | '.join(digest.get('highlights', [])[:3]))}</p>" if digest.get('highlights') else ''}
@@ -938,34 +1045,19 @@ def _render_html(
             )
         cards: list[str] = []
         for entry in entries[: settings.report.top_n_per_topic]:
-            paper = entry.paper
-            cards.append(
-                f"""
-                <article class="paper-card">
-                  <h3>{html.escape(paper.title)}</h3>
-                  <p class="meta">相关性 {entry.classification} / 分数 {entry.score} / 来源 {html.escape(', '.join(entry.source_names) or paper.source_first)}</p>
-                  <p class="meta">发布时间 {html.escape(paper.published_at or '未知')} / Venue {html.escape(paper.venue or '未知')}</p>
-                  <p class="meta">全文状态 {html.escape(paper.fulltext_status)} / PDF {html.escape(paper.pdf_status)} / 页数 {html.escape(str(paper.page_count or '未知'))} / 总结来源 {html.escape(paper.summary_basis or '未知')}</p>
-                  <p class="meta">单篇报告 reports/papers/{html.escape(_paper_report_stem(paper))}.html</p>
-                  <div class="paper-grid">
-                    <div class="paper-panel">
-                      <p><strong>匹配词：</strong>{html.escape(', '.join(entry.matched_keywords) or '无')}</p>
-                      <p><strong>默认总结：</strong>{html.escape(paper.summary_text)}</p>
-                    </div>
-                    <div class="paper-panel">
-                      <p><strong>{'全文节选' if paper.fulltext_excerpt else '摘要片段'}：</strong>{html.escape(shorten(paper.fulltext_excerpt or paper.abstract or '无摘要', 360))}</p>
-                    </div>
-                  </div>
-                  <div class="llm-summary-section">
-                    <p><strong>多模型摘要：</strong></p>
-                    {_render_summary_html(variants, paper_summaries_by_paper.get(paper.id, []))}
-                  </div>
-                  <p><a href="{html.escape(paper.primary_url or (entry.source_urls[0] if entry.source_urls else '#'))}">打开原始链接</a></p>
-                </article>
-                """
-            )
+            cards.append(_render_report_entry_html(entry, paper_summaries_by_paper, variants))
+        fallback_note = ""
         if not cards:
-            cards.append('<article class="paper-card"><p>本窗口内没有新记录。</p></article>')
+            if fallback_entries and fallback_days:
+                fallback_note = (
+                    f'<p class="trend">本窗口内没有新的严格命中论文，已自动补充近 {fallback_days} 天高分回顾。</p>'
+                )
+                cards.extend(
+                    _render_report_entry_html(entry, paper_summaries_by_paper, variants)
+                    for entry in fallback_entries[: settings.report.top_n_per_topic]
+                )
+            else:
+                cards.append('<article class="paper-card"><p>本窗口内没有新的严格命中论文，且补充回顾窗口内也没有可展示论文。</p></article>')
         sections.append(
             f"""
             <section class="topic-section">
@@ -973,6 +1065,7 @@ def _render_html(
                 <h2>{html.escape(topic.display_name)}</h2>
                 <p>{html.escape(topic.description)}</p>
                 <p class="trend">{html.escape(_topic_trend_sentence(entries))}</p>
+                {fallback_note}
               </div>
               <div class="topic-digest-grid">
                 {''.join(digest_cards)}
@@ -1127,7 +1220,7 @@ def _render_catalog_markdown(
     ]
 
     for topic in settings.topics:
-        entries = grouped_entries.get(topic.id, [])
+        entries = _sorted_entries(grouped_entries.get(topic.id, []))
         lines.append(f"## {topic.display_name}")
         lines.append("")
         lines.append(topic.description)
@@ -1192,7 +1285,7 @@ def _render_catalog_html(
     unique_paper_ids = {entry.paper.id for items in grouped_entries.values() for entry in items}
     sections: list[str] = []
     for topic in settings.topics:
-        entries = grouped_entries.get(topic.id, [])
+        entries = _sorted_entries(grouped_entries.get(topic.id, []))
         digest_cards: list[str] = []
         for variant in variants:
             variant_id = str(_variant_attr(variant, "variant_id") or "")
@@ -1482,7 +1575,7 @@ def generate_catalog_report(
                             ],
                         },
                     }
-                    for entry in grouped_entries.get(topic.id, [])
+                    for entry in _sorted_entries(grouped_entries.get(topic.id, []))
                 ]
                 for topic in settings.topics
             },
@@ -1528,7 +1621,7 @@ def _render_comparison_markdown(
     ]
 
     for topic in settings.topics:
-        entries = grouped_entries.get(topic.id, [])
+        entries = _sorted_entries(grouped_entries.get(topic.id, []))
         lines.append(f"## {topic.display_name}")
         lines.append("")
         lines.append(topic.description)
@@ -1580,7 +1673,7 @@ def _render_comparison_html(
     label = _report_label(report_type)
     sections: list[str] = []
     for topic in settings.topics:
-        entries = grouped_entries.get(topic.id, [])
+        entries = _sorted_entries(grouped_entries.get(topic.id, []))
         variant_blocks: list[str] = []
         for variant in variants:
             digest = digests_by_variant.get(variant["slug"], {}).get(topic.id, {})
@@ -1717,13 +1810,30 @@ def generate_report(
     grouped_entries: dict[str, list[ReportEntry]] = defaultdict(list)
     for entry in entries:
         grouped_entries[entry.topic_id].append(entry)
+    fallback_entries_by_topic, fallback_days_by_topic = _collect_fallback_review_entries(
+        db,
+        settings,
+        report_type,
+        report_date,
+        grouped_entries,
+    )
+    digest_grouped_entries = {
+        topic.id: _sorted_entries(grouped_entries.get(topic.id, []) or fallback_entries_by_topic.get(topic.id, []))
+        for topic in settings.topics
+    }
+    all_report_entries: list[ReportEntry] = []
+    for items in grouped_entries.values():
+        all_report_entries.extend(items)
+    for items in fallback_entries_by_topic.values():
+        all_report_entries.extend(items)
+    all_paper_ids = list({entry.paper.id for entry in all_report_entries})
 
     progress_bar.advance(detail="读取逐篇 LLM 摘要")
-    paper_summaries_by_paper = db.fetch_paper_llm_summaries([entry.paper.id for entry in entries])
+    paper_summaries_by_paper = db.fetch_paper_llm_summaries(all_paper_ids)
     display_variants, visible_summaries_by_paper = _resolve_display_variants(report_variants, paper_summaries_by_paper)
     topic_digests_by_variant = _collect_topic_digests_by_variant(
         settings,
-        grouped_entries,
+        digest_grouped_entries,
         visible_summaries_by_paper,
         digest_variants,
         use_llm_topic_digest,
@@ -1740,7 +1850,7 @@ def generate_report(
     paper_report_outputs = generate_paper_reports(
         db,
         settings,
-        [entry.paper.id for entry in entries],
+        all_paper_ids,
         llm_variants=display_variants,
     )
 
@@ -1751,6 +1861,8 @@ def generate_report(
         start_at,
         end_at,
         grouped_entries,
+        fallback_entries_by_topic,
+        fallback_days_by_topic,
         visible_summaries_by_paper,
         topic_digests_by_variant,
         display_variants,
@@ -1763,6 +1875,8 @@ def generate_report(
         start_at,
         end_at,
         grouped_entries,
+        fallback_entries_by_topic,
+        fallback_days_by_topic,
         visible_summaries_by_paper,
         topic_digests_by_variant,
         display_variants,
@@ -1844,6 +1958,76 @@ def generate_report(
                 ]
                 for topic_id, topic_entries in grouped_entries.items()
             },
+            "fallback_reviews": {
+                topic_id: {
+                    "days": fallback_days_by_topic[topic_id],
+                    "entries": [
+                        {
+                            "topic_name": entry.topic_name,
+                            "score": entry.score,
+                            "classification": entry.classification,
+                            "matched_keywords": entry.matched_keywords,
+                            "reasons": entry.reasons,
+                            "paper": {
+                                "title": entry.paper.title,
+                                "published_at": entry.paper.published_at,
+                                "primary_url": entry.paper.primary_url,
+                                "summary_text": entry.paper.summary_text,
+                                "summary_basis": entry.paper.summary_basis,
+                                "venue": entry.paper.venue,
+                                "categories": entry.paper.categories,
+                                "pdf_status": entry.paper.pdf_status,
+                                "pdf_local_path": entry.paper.pdf_local_path,
+                                "fulltext_status": entry.paper.fulltext_status,
+                                "fulltext_txt_path": entry.paper.fulltext_txt_path,
+                                "page_count": entry.paper.page_count,
+                                "llm_summaries": [
+                                    {
+                                        "variant_id": summary.variant_id,
+                                        "variant_label": summary.variant_label,
+                                        "model": summary.model,
+                                        "summary_text": summary.summary_text,
+                                        "summary_basis": summary.summary_basis,
+                                        "summary_scope": _summary_scope_label(summary),
+                                        "summary_scope_note": _summary_scope_note(summary),
+                                        "source_mode": (
+                                            summary.structured.get("source_mode", "")
+                                            if isinstance(summary.structured, dict)
+                                            else ""
+                                        ),
+                                        "pdf_input_strategy": (
+                                            summary.structured.get("pdf_input_strategy", "")
+                                            if isinstance(summary.structured, dict)
+                                            else ""
+                                        ),
+                                        "direct_pdf_strategy": (
+                                            summary.structured.get("direct_pdf_strategy", "")
+                                            if isinstance(summary.structured, dict)
+                                            else ""
+                                        ),
+                                        "direct_pdf_status": (
+                                            summary.structured.get("direct_pdf_status", "")
+                                            if isinstance(summary.structured, dict)
+                                            else ""
+                                        ),
+                                        "chunk_count": (
+                                            summary.structured.get("chunk_count")
+                                            if isinstance(summary.structured, dict)
+                                            else None
+                                        ),
+                                        "structured": summary.structured,
+                                        "usage": summary.usage,
+                                    }
+                                    for summary in visible_summaries_by_paper.get(entry.paper.id, [])
+                                ],
+                                "paper_report": paper_report_outputs.get(entry.paper.id, {}),
+                            },
+                        }
+                        for entry in topic_entries
+                    ],
+                }
+                for topic_id, topic_entries in fallback_entries_by_topic.items()
+            },
         },
         ensure_ascii=False,
         indent=2,
@@ -1869,6 +2053,7 @@ def generate_report(
             "topic_digests": {
                 variant_id: list(items.keys()) for variant_id, items in topic_digests_by_variant.items()
             },
+            "fallback_reviews": fallback_days_by_topic,
             "variants": _serialize_variants(display_variants),
             "paper_reports": paper_report_outputs,
         },

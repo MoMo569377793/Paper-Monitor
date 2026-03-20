@@ -21,7 +21,7 @@ from paper_monitor.models import FetchPlan, LLMResult
 from paper_monitor.models import PaperCandidate, PaperRecord, ReportEntry, RunStats, TopicEvaluation
 from paper_monitor.pipeline import MonitorPipeline
 from paper_monitor.reports import generate_catalog_report, generate_comparison_report, generate_paper_reports, generate_report
-from paper_monitor.scoring import evaluate_paper_against_topic
+from paper_monitor.scoring import evaluate_candidate_against_topic, evaluate_paper_against_topic
 from paper_monitor.storage import Database
 
 
@@ -56,6 +56,7 @@ class MonitorPipelineTest(unittest.TestCase):
 
             settings = load_settings(root / "config" / "config.json")
             settings.topics = [settings.topics[0]]
+            settings.topics[0].seed_papers = []
             db = Database(settings.database_path, settings.timezone)
             db.initialize()
             pipeline = MonitorPipeline(settings, db)
@@ -65,7 +66,7 @@ class MonitorPipelineTest(unittest.TestCase):
                 source_paper_id="2901.00001",
                 query_text="matrix-free finite element",
                 title="Matrix-Free FEM Baseline",
-                abstract="matrix-free finite element and partial assembly",
+                abstract="matrix-free finite element, partial assembly, GPU implementation, and benchmark performance",
                 authors=["Alice"],
                 published_at="2026-03-10T09:00:00+08:00",
                 updated_at="2026-03-10T09:00:00+08:00",
@@ -76,14 +77,14 @@ class MonitorPipelineTest(unittest.TestCase):
                 venue="arXiv",
                 year=2026,
                 categories=["cs.NA"],
-                raw={"fixture": True},
+                raw={"fixture": True, "ranking": {"citation_count": 5, "source": "fixture"}},
             )
             new_candidate = PaperCandidate(
                 source_name="arxiv",
                 source_paper_id="2901.00002",
                 query_text="matrix-free finite element",
                 title="Matrix-Free FEM Incremental",
-                abstract="matrix-free finite element and multigrid",
+                abstract="matrix-free finite element, multigrid, operator evaluation, and performance portability",
                 authors=["Bob"],
                 published_at="2026-03-10T11:00:00+08:00",
                 updated_at="2026-03-10T11:00:00+08:00",
@@ -94,7 +95,7 @@ class MonitorPipelineTest(unittest.TestCase):
                 venue="arXiv",
                 year=2026,
                 categories=["cs.NA"],
-                raw={"fixture": True},
+                raw={"fixture": True, "ranking": {"citation_count": 6, "source": "fixture"}},
             )
 
             class FakeFetcher:
@@ -163,7 +164,7 @@ class MonitorPipelineTest(unittest.TestCase):
                         source_paper_id=f"arxiv-{index}",
                         query_text="fixture",
                         title=f"Shared Paper {index}" if index < 20 else f"Arxiv Unique Paper {index}",
-                        abstract="matrix-free finite element and partial assembly",
+                        abstract="matrix-free finite element, partial assembly, GPU implementation, and benchmark performance",
                         authors=["Alice"],
                         published_at=f"2026-03-{28 - (index % 20):02d}T09:00:00+08:00",
                         updated_at=f"2026-03-{28 - (index % 20):02d}T09:00:00+08:00",
@@ -174,7 +175,7 @@ class MonitorPipelineTest(unittest.TestCase):
                         venue="arXiv",
                         year=2026,
                         categories=["cs.NA"],
-                        raw={"fixture": True},
+                        raw={"fixture": True, "ranking": {"citation_count": 2, "source": "fixture"}},
                     )
                 )
             for index in range(70):
@@ -184,7 +185,7 @@ class MonitorPipelineTest(unittest.TestCase):
                         source_paper_id=f"dblp-{index}",
                         query_text="fixture",
                         title=f"Shared Paper {index}" if index < 20 else f"DBLP Unique Paper {index}",
-                        abstract="matrix-free finite element and multigrid",
+                        abstract="matrix-free finite element, multigrid, operator evaluation, and performance portability",
                         authors=["Bob"],
                         published_at=f"2026-03-{28 - (index % 20):02d}",
                         updated_at=f"2026-03-{28 - (index % 20):02d}",
@@ -195,16 +196,156 @@ class MonitorPipelineTest(unittest.TestCase):
                         venue="SC",
                         year=2026,
                         categories=["Conference"],
-                        raw={"fixture": True},
+                        raw={"fixture": True, "ranking": {"citation_count": 2, "source": "fixture"}},
                     )
                 )
 
-            selected = pipeline._select_topic_candidates(candidates, FetchPlan(recent_limit=100, page_size=50))
+            selected = pipeline._select_topic_candidates(
+                settings.topics[0],
+                candidates,
+                FetchPlan(recent_limit=100, page_size=50),
+            )
             logical_titles = {candidate.title for candidate in selected}
 
             self.assertEqual(len(logical_titles), 100)
             self.assertLessEqual(len(selected), 120)
 
+            db.close()
+
+    def test_matrix_free_topic_requires_direct_matrix_free_and_impl_signals(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_IKUN)
+        topic = next(item for item in settings.topics if item.id == "matrix_free_fem")
+
+        broad_gpu_candidate = PaperCandidate(
+            source_name="arxiv",
+            source_paper_id="broad-1",
+            query_text="fixture",
+            title="GPU Acceleration for High-Order Finite Element Solvers",
+            abstract="We accelerate high-order finite element kernels on GPUs with benchmarks.",
+            authors=["Alice"],
+            venue="SC",
+            year=2025,
+            categories=["cs.DC"],
+            raw={},
+        )
+        self.assertEqual(evaluate_candidate_against_topic(broad_gpu_candidate, topic).classification, "irrelevant")
+
+        math_only_candidate = PaperCandidate(
+            source_name="arxiv",
+            source_paper_id="math-1",
+            query_text="fixture",
+            title="Matrix-Free Finite Element Discretization with Error Analysis",
+            abstract="We study a matrix-free finite element formulation and prove convergence and stability.",
+            authors=["Bob"],
+            venue="Journal of Numerical Analysis",
+            year=2024,
+            categories=["math.NA"],
+            raw={},
+        )
+        self.assertEqual(evaluate_candidate_against_topic(math_only_candidate, topic).classification, "irrelevant")
+
+        target_candidate = PaperCandidate(
+            source_name="arxiv",
+            source_paper_id="target-1",
+            query_text="fixture",
+            title="Matrix-Free Operator Evaluation for High-Order Finite Elements on GPUs",
+            abstract="We present matrix-free operator evaluation with sum-factorization, CUDA backends, and roofline benchmarks.",
+            authors=["Carol"],
+            venue="SC",
+            year=2025,
+            categories=["cs.DC"],
+            raw={"ranking": {"citation_count": 220}},
+        )
+        evaluation = evaluate_candidate_against_topic(target_candidate, topic)
+        self.assertIn(evaluation.classification, {"relevant", "maybe"})
+        self.assertGreaterEqual(evaluation.score, topic.threshold)
+
+    def test_recent_limit_preserves_cited_classics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            (root / "config" / "config.json").write_text(
+                FIXTURE_CONFIG_IKUN.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(root / "config" / "config.json")
+            topic = next(item for item in settings.topics if item.id == "ai_operator_acceleration")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            candidates: list[PaperCandidate] = []
+            for index in range(80):
+                candidates.append(
+                    PaperCandidate(
+                        source_name="dblp",
+                        source_paper_id=f"recent-{index}",
+                        query_text="fixture",
+                        title=f"Recent Kernel Fusion Paper {index}",
+                        abstract="Kernel fusion and GEMM optimization for transformer inference on GPUs.",
+                        authors=["Alice"],
+                        published_at=f"2026-03-{(index % 28) + 1:02d}",
+                        updated_at=f"2026-03-{(index % 28) + 1:02d}",
+                        primary_url=f"https://example.com/recent/{index}",
+                        venue="MLSys",
+                        year=2026,
+                        categories=["cs.DC"],
+                        raw={"ranking": {"citation_count": 3, "source": "fixture"}},
+                    )
+                )
+            for index in range(80):
+                candidates.append(
+                    PaperCandidate(
+                        source_name="dblp",
+                        source_paper_id=f"classic-{index}",
+                        query_text="fixture",
+                        title=f"Classic GEMM Optimization Paper {index}",
+                        abstract="GEMM optimization, Tensor Core scheduling, and system performance engineering for inference.",
+                        authors=["Bob"],
+                        published_at=f"2016-01-{(index % 28) + 1:02d}",
+                        updated_at=f"2016-01-{(index % 28) + 1:02d}",
+                        primary_url=f"https://example.com/classic/{index}",
+                        venue="ISCA",
+                        year=2016,
+                        categories=["cs.AR"],
+                        raw={"ranking": {"citation_count": 800, "influential_citation_count": 120, "source": "fixture"}},
+                    )
+                )
+
+            selected = pipeline._select_topic_candidates(topic, candidates, FetchPlan(recent_limit=100, page_size=50))
+            classic_count = len({item.title for item in selected if item.title.startswith("Classic GEMM Optimization")})
+            self.assertGreaterEqual(classic_count, 45)
+            db.close()
+
+    def test_seed_candidates_are_forced_into_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            (root / "config" / "config.json").write_text(
+                FIXTURE_CONFIG_IKUN.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(root / "config" / "config.json")
+            settings.topics = [next(item for item in settings.topics if item.id == "ai_operator_acceleration")]
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            stats = RunStats()
+            for candidate in pipeline._seed_candidates_for_topic(settings.topics[0]):
+                pipeline._process_candidate(candidate, stats)
+            row = db.connection.execute(
+                """
+                SELECT p.id
+                FROM papers p
+                JOIN matches m ON m.paper_id = p.id
+                WHERE p.title = ? AND m.topic_id = ?
+                """,
+                ("FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness", "ai_operator_acceleration"),
+            ).fetchone()
+            self.assertIsNotNone(row)
             db.close()
 
     def test_pipeline_scoring_and_report_generation(self) -> None:
@@ -288,6 +429,130 @@ class MonitorPipelineTest(unittest.TestCase):
             self.assertIn("有限元分析 Matrix-Free 算法优化", html)
             self.assertIn("AI 算子加速", html)
 
+            db.close()
+
+    def test_generate_report_handles_stored_variant_dicts_without_runtime_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = FIXTURE_CONFIG_IKUN.read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            candidate = PaperCandidate(
+                source_name="arxiv",
+                source_paper_id="2509.00001",
+                query_text="all:\"matrix-free\" AND all:\"finite element\"",
+                title="Stored Variant Render Sample",
+                abstract="matrix-free finite element operator application on GPUs",
+                authors=["Alice"],
+                published_at="2026-03-10T09:00:00+08:00",
+                updated_at="2026-03-10T09:00:00+08:00",
+                primary_url="https://arxiv.org/abs/2509.00001",
+                pdf_url="https://arxiv.org/pdf/2509.00001.pdf",
+                doi="",
+                arxiv_id="2509.00001",
+                venue="arXiv",
+                year=2026,
+                categories=["cs.NA"],
+                raw={"fixture": True},
+            )
+            pipeline._process_candidate(candidate, RunStats())
+
+            db.upsert_paper_llm_summary(
+                1,
+                variant_id="ikun",
+                variant_label="ikun_gpt-5.4",
+                provider="IkunCoding",
+                base_url="https://api.ikuncode.cc/v1",
+                model="gpt-5.4",
+                summary_text="问题：矩阵自由有限元算子应用成本高。方法：使用 GPU 和 partial assembly。",
+                summary_basis="llm+pdf+metadata",
+                tags=["matrix-free"],
+                structured={
+                    "summary": "使用 GPU 和 partial assembly 的矩阵自由有限元总结。",
+                    "problem": "矩阵自由有限元算子应用成本高。",
+                    "method": "使用 GPU 和 partial assembly。",
+                    "source_mode": "pdf_direct",
+                    "direct_pdf_status": "used",
+                },
+                usage={},
+            )
+
+            class FakeRenderClient:
+                enabled = False
+
+            paths = generate_report(
+                db,
+                settings,
+                report_date="2026-03-10",
+                report_type="daily",
+                lookback_days=1,
+                llm_client=FakeRenderClient(),
+                llm_variants=[],
+                use_llm_topic_digest=False,
+            )
+
+            markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
+            self.assertIn("ikun_gpt-5.4 主题概览：未生成", markdown)
+            self.assertIn("Stored Variant Render Sample", markdown)
+            db.close()
+
+    def test_generate_report_adds_fallback_review_when_window_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            source_config = FIXTURE_CONFIG_POE.read_text(encoding="utf-8")
+            (root / "config" / "config.json").write_text(source_config, encoding="utf-8")
+
+            settings = load_settings(root / "config" / "config.json")
+            db = Database(settings.database_path, settings.timezone)
+            db.initialize()
+            pipeline = MonitorPipeline(settings, db)
+
+            candidate = PaperCandidate(
+                source_name="arxiv",
+                source_paper_id="2502.00001",
+                query_text="all:\"matrix-free\" AND all:\"finite element\"",
+                title="Matrix-Free Fallback Review Sample",
+                abstract="This paper studies matrix-free operator evaluation and performance portability for high-order finite elements on GPUs.",
+                authors=["Alice"],
+                published_at="2026-02-15T09:00:00+08:00",
+                updated_at="2026-02-15T09:00:00+08:00",
+                primary_url="https://arxiv.org/abs/2502.00001",
+                pdf_url="https://arxiv.org/pdf/2502.00001.pdf",
+                doi="",
+                arxiv_id="2502.00001",
+                venue="arXiv",
+                year=2026,
+                categories=["cs.NA"],
+                raw={"fixture": True},
+            )
+            pipeline._process_candidate(candidate, RunStats())
+
+            class FakeRenderClient:
+                enabled = False
+
+            paths = generate_report(
+                db,
+                settings,
+                report_date="2026-03-10",
+                report_type="daily",
+                lookback_days=1,
+                llm_client=FakeRenderClient(),
+            )
+            markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
+            report_json = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
+
+            self.assertIn("本窗口内没有新的严格命中论文。", markdown)
+            self.assertIn("自动补充：近 `90` 天高分回顾", markdown)
+            self.assertIn("Matrix-Free Fallback Review Sample", markdown)
+            self.assertIn("fallback_reviews", report_json)
+            self.assertIn("matrix_free_fem", report_json["fallback_reviews"])
             db.close()
 
     def test_ai_operator_priority_categories_and_venues_raise_score(self) -> None:
@@ -1553,6 +1818,224 @@ class MonitorPipelineTest(unittest.TestCase):
 
         self.assertEqual(processor.resolve_pdf_url(paper), "https://arxiv.org/pdf/2308.01792.pdf")
 
+    def test_document_processor_can_infer_pdf_from_landing_page_meta(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_IKUN)
+        processor = DocumentProcessor(settings.enrichment, "test-agent", settings.timezone)
+        paper = PaperRecord(
+            id=1,
+            title="Landing page paper",
+            title_norm="landing page paper",
+            abstract="",
+            authors=["Alice"],
+            published_at="2026-03-10",
+            updated_at="2026-03-10",
+            primary_url="https://example.invalid/paper",
+            pdf_url="",
+            doi="",
+            arxiv_id="",
+            venue="USENIX",
+            year=2026,
+            categories=["cs.PF"],
+            summary_text="",
+            summary_basis="metadata-only",
+            tags=[],
+            pdf_local_path="",
+            pdf_status="pending",
+            pdf_downloaded_at=None,
+            fulltext_txt_path="",
+            fulltext_excerpt="",
+            fulltext_status="empty",
+            page_count=None,
+            llm_summary={},
+            analysis_updated_at=None,
+            source_first="manual",
+            created_at="2026-03-10T09:00:00+08:00",
+            last_seen_at="2026-03-10T09:00:00+08:00",
+            metadata={},
+        )
+
+        html = (
+            '<html><head>'
+            '<meta name="citation_pdf_url" content="https://example.invalid/files/paper.pdf" />'
+            "</head><body></body></html>"
+        ).encode("utf-8")
+
+        class FakeResponse:
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+                self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, n: int = -1) -> bytes:
+                return self._body if n < 0 else self._body[:n]
+
+            def geturl(self) -> str:
+                return "https://example.invalid/paper"
+
+        with mock.patch("paper_monitor.enrichment.urllib.request.urlopen", return_value=FakeResponse(html)):
+            self.assertEqual(processor.resolve_pdf_url(paper), "https://example.invalid/files/paper.pdf")
+
+    def test_document_processor_can_infer_pdf_from_semantic_scholar_details(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_IKUN)
+        processor = DocumentProcessor(settings.enrichment, "test-agent", settings.timezone)
+        paper = PaperRecord(
+            id=1,
+            title="Semantic Scholar DOI paper",
+            title_norm="semantic scholar doi paper",
+            abstract="",
+            authors=["Alice"],
+            published_at="2026-03-10",
+            updated_at="2026-03-10",
+            primary_url="https://doi.org/10.1000/example",
+            pdf_url="",
+            doi="10.1000/example",
+            arxiv_id="",
+            venue="Conference",
+            year=2026,
+            categories=["cs.PF"],
+            summary_text="",
+            summary_basis="metadata-only",
+            tags=[],
+            pdf_local_path="",
+            pdf_status="pending",
+            pdf_downloaded_at=None,
+            fulltext_txt_path="",
+            fulltext_excerpt="",
+            fulltext_status="empty",
+            page_count=None,
+            llm_summary={},
+            analysis_updated_at=None,
+            source_first="manual",
+            created_at="2026-03-10T09:00:00+08:00",
+            last_seen_at="2026-03-10T09:00:00+08:00",
+            metadata={},
+        )
+
+        payload = json.dumps(
+            {
+                "title": "Semantic Scholar DOI paper",
+                "openAccessPdf": {"url": "https://downloads.example.invalid/paper.pdf"},
+            }
+        ).encode("utf-8")
+
+        class FakeResponse:
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+                self.headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, n: int = -1) -> bytes:
+                return self._body if n < 0 else self._body[:n]
+
+            def geturl(self) -> str:
+                return "https://api.semanticscholar.org/graph/v1/paper/DOI%3A10.1000%2Fexample"
+
+        with mock.patch("paper_monitor.enrichment.urllib.request.urlopen", return_value=FakeResponse(payload)):
+            self.assertEqual(processor.resolve_pdf_url(paper), "https://downloads.example.invalid/paper.pdf")
+
+    def test_document_processor_retries_semantic_scholar_http_429(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_IKUN)
+        processor = DocumentProcessor(settings.enrichment, "test-agent", settings.timezone)
+
+        payload = json.dumps(
+            {
+                "title": "Retry DOI paper",
+                "openAccessPdf": {"url": "https://downloads.example.invalid/retry.pdf"},
+            }
+        ).encode("utf-8")
+
+        class FakeResponse:
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+                self.headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, n: int = -1) -> bytes:
+                return self._body if n < 0 else self._body[:n]
+
+        calls = [
+            urllib.error.HTTPError(
+                "https://api.semanticscholar.org/graph/v1/paper/DOI%3A10.1000%2Fretry",
+                429,
+                "Too Many Requests",
+                hdrs=None,
+                fp=io.BytesIO(b"{}"),
+            ),
+            FakeResponse(payload),
+        ]
+
+        with mock.patch("paper_monitor.enrichment.urllib.request.urlopen", side_effect=calls), mock.patch(
+            "paper_monitor.enrichment.time.sleep"
+        ):
+            result = processor._fetch_semantic_scholar_details("DOI:10.1000/retry", "title,openAccessPdf")
+
+        self.assertEqual((result.get("openAccessPdf") or {}).get("url"), "https://downloads.example.invalid/retry.pdf")
+
+    def test_document_processor_returns_no_pdf_when_download_url_is_forbidden(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_IKUN)
+        processor = DocumentProcessor(settings.enrichment, "test-agent", settings.timezone)
+        paper = PaperRecord(
+            id=1,
+            title="Forbidden PDF paper",
+            title_norm="forbidden pdf paper",
+            abstract="",
+            authors=["Alice"],
+            published_at="2026-03-10",
+            updated_at="2026-03-10",
+            primary_url="https://example.invalid/paper",
+            pdf_url="https://downloads.example.invalid/forbidden.pdf",
+            doi="",
+            arxiv_id="",
+            venue="Conference",
+            year=2026,
+            categories=["cs.PF"],
+            summary_text="",
+            summary_basis="metadata-only",
+            tags=[],
+            pdf_local_path="",
+            pdf_status="pending",
+            pdf_downloaded_at=None,
+            fulltext_txt_path="",
+            fulltext_excerpt="",
+            fulltext_status="empty",
+            page_count=None,
+            llm_summary={},
+            analysis_updated_at=None,
+            source_first="manual",
+            created_at="2026-03-10T09:00:00+08:00",
+            last_seen_at="2026-03-10T09:00:00+08:00",
+            metadata={},
+        )
+
+        forbidden = urllib.error.HTTPError(
+            paper.pdf_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b""),
+        )
+
+        with mock.patch("paper_monitor.enrichment.urllib.request.urlopen", side_effect=forbidden):
+            artifacts = processor.enrich(paper, force=True)
+
+        self.assertEqual(artifacts.pdf_status, "no-pdf")
+        self.assertEqual(artifacts.fulltext_status, "empty")
+
     def test_parse_pdf_brief_summary_extracts_labeled_sections(self) -> None:
         settings = load_settings(FIXTURE_CONFIG_POE)
         client = LLMClient(settings.llm)
@@ -2502,8 +2985,8 @@ class MonitorPipelineTest(unittest.TestCase):
                     source_name="arxiv",
                     source_paper_id="2751.00001",
                     query_text="matrix-free finite element",
-                    title="Matrix-Free Fulltext Reporting Test",
-                    abstract="We study matrix-free operators and preconditioners for high-order FEM.",
+                    title="Matrix-Free Fulltext Reporting Test on GPUs",
+                    abstract="We study matrix-free operator evaluation, multigrid preconditioners, GPU kernels, and benchmark performance for high-order FEM.",
                     authors=["Alice"],
                     published_at="2026-03-10T09:00:00+08:00",
                     updated_at="2026-03-10T09:00:00+08:00",
@@ -2666,8 +3149,8 @@ class MonitorPipelineTest(unittest.TestCase):
                     source_name="arxiv",
                     source_paper_id="2903.00001",
                     query_text="matrix-free finite element",
-                    title="Matrix-Free Preconditioners for High-Order FEM",
-                    abstract="matrix-free finite element preconditioner and multigrid",
+                    title="Matrix-Free Preconditioners for High-Order FEM on GPUs",
+                    abstract="matrix-free finite element preconditioner, multigrid, GPU implementation, and benchmark performance portability",
                     authors=["Alice"],
                     published_at="2026-03-10T09:00:00+08:00",
                     updated_at="2026-03-10T09:00:00+08:00",
@@ -2914,8 +3397,8 @@ class MonitorPipelineTest(unittest.TestCase):
                     source_name="arxiv",
                     source_paper_id="2701.00001",
                     query_text="matrix-free finite element",
-                    title="Matrix-Free Multigrid for High-Order FEM",
-                    abstract="We study matrix-free multigrid and partial assembly for high-order FEM.",
+                    title="Matrix-Free Multigrid for High-Order FEM on GPUs",
+                    abstract="We study matrix-free multigrid, partial assembly, GPU kernels, and strong-scaling benchmarks for high-order FEM.",
                     authors=["Alice"],
                     published_at="2026-03-10T09:00:00+08:00",
                     updated_at="2026-03-10T09:00:00+08:00",

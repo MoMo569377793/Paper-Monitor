@@ -2,14 +2,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 data/*.db
-reports/daily/*.md
-reports/daily/*.html
-reports/weekly/*.md
-reports/weekly/*.html
-reports/papers/*.md
-reports/papers/*.html
-reports/catalog/*.md
-reports/catalog/*.html
+reports/*
 exports/*.json
 exports/papers/*.json
 artifacts/pdfs/*

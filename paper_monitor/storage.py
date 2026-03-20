@@ -266,6 +266,10 @@ class Database:
         merged_categories = unique_strings(safe_json_loads(existing["categories_json"], []) + categories)
         merged_metadata = safe_json_loads(existing["metadata_json"], {})
         if isinstance(merged_metadata, dict):
+            if isinstance(candidate.raw.get("ranking"), dict):
+                merged_metadata["ranking"] = candidate.raw["ranking"]
+            if candidate.raw.get("seed"):
+                merged_metadata["seed"] = True
             merged_metadata[candidate.source_name] = candidate.raw
 
         abstract = existing["abstract"] or ""
@@ -882,6 +886,67 @@ class Database:
             ORDER BY m.topic_name ASC, m.score DESC, p.published_at DESC, p.id DESC
             """,
             (start_at, end_at, start_day, end_day, *classifications),
+        ).fetchall()
+
+        entries: list[ReportEntry] = []
+        for row in rows:
+            paper = self._row_to_paper(row)
+            source_names = [name for name in (row["source_names_csv"] or "").split(",") if name]
+            source_urls = [url for url in (row["source_urls_csv"] or "").split(",") if url]
+            entries.append(
+                ReportEntry(
+                    topic_id=row["topic_id"],
+                    topic_name=row["topic_name"],
+                    score=float(row["score"]),
+                    classification=row["classification"],
+                    matched_keywords=safe_json_loads(row["matched_keywords_json"], []),
+                    reasons=safe_json_loads(row["reasons_json"], []),
+                    paper=paper,
+                    source_names=source_names,
+                    source_urls=source_urls,
+                )
+            )
+        return entries
+
+    def fetch_recent_topic_entries(
+        self,
+        topic_id: str,
+        start_at: str,
+        end_at: str,
+        *,
+        include_maybe: bool,
+        limit: int,
+    ) -> list[ReportEntry]:
+        classifications = ("relevant", "maybe") if include_maybe else ("relevant",)
+        placeholders = ", ".join(["?"] * len(classifications))
+        start_day = start_at[:10]
+        end_day = end_at[:10]
+        rows = self.connection.execute(
+            f"""
+            SELECT
+                m.topic_id,
+                m.topic_name,
+                m.score,
+                m.classification,
+                m.matched_keywords_json,
+                m.reasons_json,
+                p.*,
+                GROUP_CONCAT(DISTINCT ps.source_name) AS source_names_csv,
+                GROUP_CONCAT(DISTINCT ps.source_url) AS source_urls_csv
+            FROM matches m
+            JOIN papers p ON p.id = m.paper_id
+            LEFT JOIN paper_sources ps ON ps.paper_id = p.id
+            WHERE m.topic_id = ?
+              AND (
+                p.created_at BETWEEN ? AND ?
+                OR substr(COALESCE(NULLIF(p.published_at, ''), p.created_at), 1, 10) BETWEEN ? AND ?
+              )
+              AND m.classification IN ({placeholders})
+            GROUP BY m.id
+            ORDER BY m.score DESC, COALESCE(NULLIF(p.published_at, ''), p.created_at) DESC, p.id DESC
+            LIMIT ?
+            """,
+            (topic_id, start_at, end_at, start_day, end_day, *classifications, limit),
         ).fetchall()
 
         entries: list[ReportEntry] = []

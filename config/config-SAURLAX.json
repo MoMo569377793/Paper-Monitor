@@ -89,92 +89,130 @@
     {
       "id": "matrix_free_fem",
       "display_name": "有限元分析 Matrix-Free 算法优化",
-      "description": "跟踪 matrix-free、partial assembly、sum factorization、高阶有限元在 GPU、多核、SIMD、性能可移植和算子应用优化方面的论文，更偏实现与性能优化而非纯数学分析。",
+      "description": "核心关注 matrix-free 有限元/谱元算子在现代硬件上的实现、优化与性能可移植。只有直接讨论 matrix-free 及其实现/性能的论文才纳入；纯数学理论或泛有限元 GPU 工作不纳入。",
       "source_queries": {
         "arxiv": [
           "all:\"matrix-free\" AND all:\"finite element\"",
-          "all:\"partial assembly\" AND all:\"finite element\"",
-          "all:\"sum factorization\" AND all:\"finite element\"",
-          "all:\"matrix-free\" AND all:\"operator application\"",
+          "all:\"matrix free\" AND all:\"finite element\"",
+          "all:\"matrix-free operator evaluation\"",
+          "all:\"matrix-free operator application\"",
+          "all:\"on-the-fly operator evaluation\" AND all:\"finite element\"",
+          "all:\"matrix-free\" AND all:\"sum factorization\"",
+          "all:\"matrix-free\" AND all:\"spectral element\"",
           "all:\"matrix-free\" AND all:\"GPU\"",
           "all:\"matrix-free\" AND all:\"performance portability\"",
-          "all:\"matrix-free\" AND all:\"vectorization\"",
-          "all:\"libCEED\""
+          "all:\"libCEED\" AND all:\"matrix-free\""
         ],
         "dblp": [
           "\"matrix-free\" \"finite element\"",
-          "\"partial assembly\" \"finite element\"",
-          "\"sum factorization\" \"finite element\"",
-          "\"matrix-free\" \"operator application\"",
+          "\"matrix free\" \"finite element\"",
+          "\"matrix-free operator evaluation\"",
+          "\"matrix-free operator application\"",
+          "\"on-the-fly operator evaluation\" finite element",
+          "\"matrix-free\" \"sum factorization\"",
+          "\"matrix-free\" \"spectral element\"",
           "\"matrix-free\" GPU",
           "\"matrix-free\" \"performance portability\"",
-          "\"matrix-free\" vectorization",
           "libCEED matrix-free"
         ],
         "google_scholar_alerts": [
           "\"matrix-free\" \"finite element\"",
-          "\"partial assembly\" FEM",
-          "\"sum factorization\" finite element",
-          "\"matrix-free\" \"operator application\"",
-          "\"matrix-free\" GPU finite element",
+          "\"matrix-free\" \"operator evaluation\"",
+          "\"matrix-free\" \"sum factorization\"",
+          "\"matrix-free\" GPU",
           "\"matrix-free\" \"performance portability\""
         ]
       },
-      "must_match_groups": [
+      "required_keyword_groups": [
         [
           "matrix-free",
           "matrix free",
-          "partial assembly",
-          "sum factorization"
+          "matrix-free operator evaluation",
+          "matrix-free operator application",
+          "matrix-free evaluation",
+          "on-the-fly operator evaluation"
         ],
         [
           "finite element",
           "finite elements",
           "fem",
-          "high-order fem",
-          "high order finite element",
-          "galerkin",
           "discontinuous galerkin",
           "dg",
+          "high-order finite element",
+          "high order finite element",
           "spectral element"
         ],
         [
-          "operator",
-          "application",
-          "gpu",
+          "implementation",
           "performance",
-          "vectorization",
-          "parallel",
-          "multigrid",
-          "preconditioner",
+          "benchmark",
+          "gpu",
+          "multi-core",
+          "multicore",
           "simd",
-          "scaling"
+          "vectorization",
+          "performance portability",
+          "operator application",
+          "operator evaluation",
+          "roofline",
+          "throughput",
+          "scaling",
+          "memory bandwidth",
+          "backend"
+        ]
+      ],
+      "must_match_groups": [
+        [
+          "sum factorization",
+          "sum-factorization",
+          "tensor contraction",
+          "partial assembly"
+        ],
+        [
+          "libceed",
+          "mfem",
+          "deal.ii",
+          "deal ii",
+          "nekrs",
+          "nek5000"
+        ],
+        [
+          "gpu",
+          "cuda",
+          "hip",
+          "simd",
+          "vectorization",
+          "performance portability",
+          "benchmark"
         ]
       ],
       "positive_keywords": [
-        "libceed",
-        "mfem",
-        "deal.ii",
-        "deal ii",
-        "operator application",
-        "fused operator",
-        "multigrid",
-        "preconditioner",
+        "sum factorization",
+        "sum-factorization",
+        "partial assembly",
+        "high-order finite element",
+        "high order finite element",
         "spectral element",
-        "tensor contraction",
-        "element restriction",
+        "operator application",
+        "operator evaluation",
         "performance portability",
-        "roofline",
-        "vectorization",
-        "simd",
-        "avx512",
-        "sve",
         "gpu",
-        "gpu acceleration",
+        "multi-core",
+        "multicore",
+        "simd",
+        "vectorization",
         "cuda",
         "hip",
         "kokkos",
         "raja",
+        "libceed",
+        "mfem",
+        "deal.ii",
+        "deal ii",
+        "nekrs",
+        "nek5000",
+        "benchmark",
+        "roofline",
         "strong scaling",
         "weak scaling",
         "memory bandwidth",
@@ -190,7 +228,8 @@
         "well posedness",
         "existence and uniqueness",
         "convergence proof",
-        "inverse problem"
+        "inverse problem",
+        "stability proof"
       ],
       "arxiv_categories": [
         "cs.DC",
@@ -204,16 +243,14 @@
         "cs.NA"
       ],
       "dblp_venue_keywords": [
-        "finite elements",
-        "supercomputing",
-        "high performance",
         "sc",
         "ppopp",
         "ipdps",
         "ics",
         "cluster",
         "cgo",
-        "asplos"
+        "asplos",
+        "parco"
       ],
       "priority_venue_keywords": [
         "sc",
@@ -222,119 +259,327 @@
         "ics",
         "cluster",
         "cgo",
-        "asplos"
+        "asplos",
+        "parco"
       ],
-      "threshold": 18
+      "threshold": 18,
+      "seed_papers": [
+        {
+          "title": "A generic interface for parallel cell-based finite element operator application",
+          "authors": [
+            "Martin Kronbichler",
+            "Katharina Kormann"
+          ],
+          "year": 2012,
+          "venue": "Computers & Fluids",
+          "primary_url": "https://doi.org/10.1016/j.compfluid.2012.04.012",
+          "doi": "10.1016/j.compfluid.2012.04.012",
+          "tags": [
+            "curated-seed",
+            "classic",
+            "deal.ii"
+          ]
+        },
+        {
+          "title": "Fast matrix-free evaluation of discontinuous Galerkin finite element operators",
+          "authors": [
+            "Martin Kronbichler",
+            "Katharina Kormann"
+          ],
+          "year": 2019,
+          "venue": "ACM Transactions on Mathematical Software",
+          "primary_url": "https://doi.org/10.1145/3325864",
+          "doi": "10.1145/3325864",
+          "tags": [
+            "curated-seed",
+            "classic",
+            "dg"
+          ]
+        },
+        {
+          "title": "Matrix-free finite-element computations on graphics processors with adaptive mesh refinement",
+          "authors": [
+            "Karl Ljungkvist"
+          ],
+          "year": 2017,
+          "venue": "Licentiate Thesis / Uppsala University",
+          "tags": [
+            "curated-seed",
+            "classic",
+            "gpu"
+          ]
+        },
+        {
+          "title": "Multigrid for matrix-free high-order finite element computations on graphics processors",
+          "authors": [
+            "Martin Kronbichler",
+            "Karl Ljungkvist"
+          ],
+          "year": 2019,
+          "venue": "ACM Transactions on Parallel Computing",
+          "primary_url": "https://doi.org/10.1145/3322813",
+          "doi": "10.1145/3322813",
+          "tags": [
+            "curated-seed",
+            "classic",
+            "multigrid",
+            "gpu"
+          ]
+        },
+        {
+          "title": "High-performance implementation of kernel evaluations for the matrix-free operator application in the DG context",
+          "authors": [
+            "Steffen Müthing",
+            "Piotr Piatkowski",
+            "Peter Bastian"
+          ],
+          "year": 2017,
+          "venue": "Computers & Mathematics with Applications",
+          "tags": [
+            "curated-seed",
+            "classic",
+            "dg"
+          ]
+        },
+        {
+          "title": "NekRS, a GPU-accelerated spectral element Navier-Stokes solver",
+          "authors": [
+            "Paul Fischer",
+            "Stefan Kerkemeier",
+            "Misun Min"
+          ],
+          "year": 2022,
+          "venue": "Parallel Computing",
+          "primary_url": "https://doi.org/10.1016/j.parco.2022.102982",
+          "doi": "10.1016/j.parco.2022.102982",
+          "tags": [
+            "curated-seed",
+            "spectral-element",
+            "gpu"
+          ]
+        },
+        {
+          "title": "The deal.II Library, Version 9.7",
+          "authors": [
+            "David Arndt",
+            "Wolfgang Bangerth",
+            "Martin Kronbichler"
+          ],
+          "year": 2025,
+          "venue": "Journal of Numerical Mathematics",
+          "primary_url": "https://doi.org/10.1515/jnma-2025-0115",
+          "doi": "10.1515/jnma-2025-0115",
+          "tags": [
+            "curated-seed",
+            "framework"
+          ]
+        },
+        {
+          "title": "High-performance finite elements with MFEM",
+          "authors": [
+            "Julian Andrej",
+            "Veselin Dobrev",
+            "Tzanio Kolev"
+          ],
+          "year": 2024,
+          "venue": "International Journal of High Performance Computing Applications",
+          "primary_url": "https://doi.org/10.1177/10943420241261981",
+          "doi": "10.1177/10943420241261981",
+          "tags": [
+            "curated-seed",
+            "framework",
+            "mfem"
+          ]
+        },
+        {
+          "title": "Spectral methods for problems in complex geometries",
+          "authors": [
+            "Steven A. Orszag"
+          ],
+          "year": 1980,
+          "venue": "Journal of Computational Physics",
+          "tags": [
+            "curated-seed",
+            "classic",
+            "sum-factorization-origin"
+          ]
+        }
+      ]
     },
     {
       "id": "ai_operator_acceleration",
       "display_name": "AI 算子加速",
-      "description": "跟踪 AI 算子优化、内核融合、编译器、GEMM/matmul、Tensor Core、ARM SVE/SME、推理与训练性能优化相关论文，并额外关注 CUTLASS、Triton、FlashAttention 系列扩展阅读线索。",
+      "description": "核心关注深度学习工作负载中的算子实现与系统级性能优化，包括 GEMM/matmul、attention 内核、kernel fusion、Tensor Core / ARM SVE/SME 利用、AI 编译器与训练/推理框架性能工程。纯算法或模型设计论文不纳入。",
       "source_queries": {
         "arxiv": [
-          "all:\"kernel fusion\"",
-          "all:\"operator fusion\"",
-          "all:\"tensor compiler\"",
-          "all:\"FlashAttention\"",
-          "all:\"MLIR\" AND all:\"deep learning\"",
-          "all:\"CUTLASS\"",
-          "all:\"Triton\" AND all:\"compiler\"",
           "all:\"GEMM optimization\"",
+          "all:\"matmul optimization\"",
           "all:\"matrix multiplication\" AND all:\"optimization\"",
-          "all:\"Tensor Core\" AND all:\"deep learning\"",
-          "all:\"SVE\" AND all:\"GEMM\"",
-          "all:\"SME\" AND all:\"GEMM\""
+          "all:\"FlashAttention\"",
+          "all:\"kernel fusion\" AND all:\"deep learning\"",
+          "all:\"operator fusion\" AND all:\"inference\"",
+          "all:\"Tensor Core\" AND all:\"GEMM\"",
+          "all:\"Triton\" AND all:\"compiler\"",
+          "all:\"TVM\" AND all:\"deep learning\"",
+          "all:\"MLIR\" AND all:\"deep learning\"",
+          "all:\"ARM SVE\" AND all:\"GEMM\"",
+          "all:\"ARM SME\" AND all:\"GEMM\"",
+          "all:\"CUTLASS\""
         ],
         "dblp": [
-          "\"kernel fusion\" deep learning",
-          "\"tensor compiler\" deep learning",
-          "\"operator acceleration\" AI",
-          "FlashAttention",
-          "MLIR deep learning compiler",
-          "CUTLASS GEMM",
-          "Triton compiler deep learning",
-          "\"GEMM optimization\" accelerator",
+          "\"GEMM optimization\"",
+          "\"matmul optimization\"",
           "\"matrix multiplication\" optimization",
-          "\"Tensor Core\" deep learning",
-          "ARM SVE GEMM",
-          "ARM SME GEMM"
+          "FlashAttention",
+          "\"kernel fusion\" deep learning",
+          "\"operator fusion\" inference",
+          "\"Tensor Core\" GEMM",
+          "Triton compiler deep learning",
+          "TVM optimizing compiler deep learning",
+          "MLIR deep learning compiler",
+          "\"ARM SVE\" GEMM",
+          "\"ARM SME\" GEMM",
+          "CUTLASS GEMM"
         ],
         "google_scholar_alerts": [
-          "\"kernel fusion\" transformer",
-          "\"tensor compiler\" deep learning",
-          "\"operator acceleration\" AI",
-          "FlashAttention kernel optimization",
-          "CUTLASS GEMM kernel",
-          "Triton kernel compiler",
-          "\"GEMM optimization\" AI",
-          "\"Tensor Core\" transformer",
-          "\"ARM SVE\" GEMM",
-          "\"ARM SME\" GEMM"
+          "\"GEMM optimization\" deep learning",
+          "\"matrix multiplication\" optimization transformer",
+          "\"FlashAttention\"",
+          "\"kernel fusion\" inference",
+          "\"Tensor Core\" GEMM",
+          "\"Triton\" compiler",
+          "\"CUTLASS\" GEMM"
         ]
       },
-      "must_match_groups": [
+      "required_keyword_groups": [
         [
-          "kernel",
-          "operator",
+          "implementation",
+          "implemented",
+          "system software",
+          "runtime",
           "compiler",
+          "compilation",
+          "code generation",
+          "kernel",
+          "kernel implementation",
           "fusion",
-          "acceleration",
-          "optimization",
-          "optimized",
-          "scheduling"
+          "kernel fusion",
+          "operator fusion",
+          "tiling",
+          "scheduling",
+          "system",
+          "systems",
+          "software stack",
+          "compilation stack",
+          "template library"
         ],
         [
-          "deep learning",
-          "llm",
-          "transformer",
-          "tensor",
-          "inference",
-          "training",
           "gemm",
           "matmul",
           "matrix multiplication",
+          "attention",
+          "flashattention",
           "tensor core",
+          "tensor cores",
+          "triton",
+          "tvm",
+          "mlir",
+          "cutlass",
+          "cuda",
+          "sve",
+          "sme",
+          "wmma",
+          "mma"
+        ],
+        [
+          "deep learning",
+          "neural network",
+          "transformer",
+          "llm",
+          "large language model",
+          "inference",
+          "training",
+          "serving",
+          "pytorch",
+          "tensorflow",
+          "vllm",
+          "attention mechanism"
+        ]
+      ],
+      "must_match_groups": [
+        [
+          "gpu",
+          "cuda",
+          "tensor core",
+          "wmma",
+          "mma",
           "arm",
           "sve",
           "sme"
+        ],
+        [
+          "triton",
+          "tvm",
+          "mlir",
+          "xla",
+          "halide",
+          "inductor",
+          "cutlass"
+        ],
+        [
+          "benchmark",
+          "roofline",
+          "scaling",
+          "throughput",
+          "latency",
+          "memory bandwidth"
         ]
       ],
       "positive_keywords": [
+        "cutlass",
         "triton",
-        "tvm",
-        "mlir",
-        "xla",
-        "tensorrt",
-        "cuda",
+        "flashattention",
+        "flashattention-2",
+        "flashattention-3",
+        "flashattention-4",
         "gemm",
         "matmul",
         "matrix multiplication",
-        "attention kernel",
-        "flashattention",
-        "cutlass",
-        "wmma",
-        "mma",
         "tensor core",
         "tensor cores",
+        "wmma",
+        "mma",
+        "kernel fusion",
+        "operator fusion",
+        "tvm",
+        "mlir",
+        "halide",
+        "xla",
+        "inductor",
+        "torchinductor",
         "cublas",
-        "rocblas",
-        "onednn",
+        "cublaslt",
+        "tensorrt",
+        "vllm",
+        "inference engine",
+        "training system",
         "arm",
-        "armv9",
         "sve",
         "sme",
         "neon",
-        "graph compiler",
-        "operator scheduling",
-        "fusion pass",
-        "tensorir",
-        "code generation"
+        "roofline"
       ],
       "exclude_keywords": [
         "medical image",
         "operator theory",
-        "linear operator without acceleration",
-        "finite element operator"
+        "finite element operator",
+        "novel architecture",
+        "new model architecture",
+        "loss function",
+        "data augmentation",
+        "prompting method",
+        "diffusion model design",
+        "language modeling objective"
       ],
       "arxiv_categories": [
         "cs.LG",
@@ -350,15 +595,16 @@
         "cs.LG"
       ],
       "dblp_venue_keywords": [
-        "ppopp",
         "mlsys",
+        "ppopp",
+        "sc",
         "isca",
         "micro",
-        "hpca",
         "asplos",
-        "sc",
         "osdi",
-        "sosp"
+        "sosp",
+        "hpca",
+        "cgo"
       ],
       "priority_venue_keywords": [
         "mlsys",
@@ -368,9 +614,155 @@
         "micro",
         "asplos",
         "osdi",
-        "sosp"
+        "sosp",
+        "hpca",
+        "cgo"
       ],
-      "threshold": 18
+      "threshold": 18,
+      "seed_papers": [
+        {
+          "title": "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+          "authors": [
+            "Tri Dao",
+            "Daniel Y. Fu",
+            "Stefano Ermon",
+            "Atri Rudra",
+            "Christopher Ré"
+          ],
+          "year": 2022,
+          "venue": "NeurIPS / arXiv",
+          "primary_url": "https://arxiv.org/abs/2205.14135",
+          "arxiv_id": "2205.14135",
+          "tags": [
+            "curated-seed",
+            "flashattention"
+          ]
+        },
+        {
+          "title": "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning",
+          "authors": [
+            "Tri Dao"
+          ],
+          "year": 2023,
+          "venue": "arXiv",
+          "primary_url": "https://arxiv.org/abs/2307.08691",
+          "arxiv_id": "2307.08691",
+          "tags": [
+            "curated-seed",
+            "flashattention"
+          ]
+        },
+        {
+          "title": "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision",
+          "authors": [
+            "Tri Dao"
+          ],
+          "year": 2024,
+          "venue": "arXiv",
+          "tags": [
+            "curated-seed",
+            "flashattention"
+          ]
+        },
+        {
+          "title": "Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations",
+          "authors": [
+            "Philippe Tillet",
+            "H. T. Kung",
+            "David Cox"
+          ],
+          "year": 2019,
+          "venue": "MPC / arXiv",
+          "tags": [
+            "curated-seed",
+            "triton"
+          ]
+        },
+        {
+          "title": "CUTLASS: Fast Linear Algebra in CUDA C++",
+          "year": 2017,
+          "venue": "NVIDIA Technical Blog / Documentation",
+          "primary_url": "https://developer.nvidia.com/blog/cutlass-linear-algebra-cuda/",
+          "tags": [
+            "curated-seed",
+            "cutlass"
+          ]
+        },
+        {
+          "title": "TVM: An Automated End-to-End Optimizing Compiler for Deep Learning",
+          "authors": [
+            "Tianqi Chen",
+            "Thierry Moreau",
+            "Ziheng Jiang"
+          ],
+          "year": 2018,
+          "venue": "OSDI",
+          "tags": [
+            "curated-seed",
+            "tvm"
+          ]
+        },
+        {
+          "title": "MLIR: Scaling Compiler Infrastructure for Domain Specific Computation",
+          "authors": [
+            "Chris Lattner",
+            "Mehdi Amini",
+            "Uday Bondhugula"
+          ],
+          "year": 2021,
+          "venue": "CGO",
+          "primary_url": "https://doi.org/10.1109/CGO51591.2021.9370308",
+          "doi": "10.1109/CGO51591.2021.9370308",
+          "tags": [
+            "curated-seed",
+            "mlir"
+          ]
+        },
+        {
+          "title": "Halide: A Language and Compiler for Optimizing Parallelism, Locality, and Recomputation in Image Processing Pipelines",
+          "authors": [
+            "Jonathan Ragan-Kelley",
+            "Andrew Adams",
+            "Sylvain Paris"
+          ],
+          "year": 2013,
+          "venue": "PLDI",
+          "primary_url": "https://doi.org/10.1145/2491956.2462176",
+          "doi": "10.1145/2491956.2462176",
+          "tags": [
+            "curated-seed",
+            "halide"
+          ]
+        },
+        {
+          "title": "Kernel Fusion: An Effective Method for Better Power Efficiency on Multithreaded GPU",
+          "authors": [
+            "Peng Wang"
+          ],
+          "year": 2010,
+          "venue": "curated classic",
+          "tags": [
+            "curated-seed",
+            "kernel-fusion"
+          ]
+        },
+        {
+          "title": "Roofline: An Insightful Visual Performance Model for Multicore Architectures",
+          "authors": [
+            "Samuel Williams",
+            "Andrew Waterman",
+            "David Patterson"
+          ],
+          "year": 2009,
+          "venue": "Communications of the ACM",
+          "primary_url": "https://doi.org/10.1145/1498765.1498785",
+          "doi": "10.1145/1498765.1498785",
+          "tags": [
+            "curated-seed",
+            "roofline"
+          ]
+        }
+      ]
     }
   ]
 }

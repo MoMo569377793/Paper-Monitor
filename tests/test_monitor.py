@@ -725,6 +725,102 @@ class MonitorPipelineTest(unittest.TestCase):
 
         self.assertEqual(evaluate_candidate_against_topic(candidate, topic).classification, "irrelevant")
 
+    def test_ai_topic_summary_rerank_rejects_prompt_highlighting_paper(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_IKUN)
+        topic = next(item for item in settings.topics if item.id == "ai_operator_acceleration")
+
+        paper = PaperRecord(
+            id=228,
+            title="Prism-Delta: Differential Subspace Steering for Prompt Highlighting in Large Language Models",
+            title_norm="prism-delta",
+            abstract=(
+                "We improve prompt highlighting in large language models with differential subspace steering "
+                "and report gains on BiasBios, CounterFact, and Pronoun Change."
+            ),
+            authors=["Alice"],
+            published_at="2026-03-01T00:00:00+08:00",
+            updated_at="2026-03-01T00:00:00+08:00",
+            primary_url="https://example.com/prism",
+            pdf_url="https://example.com/prism.pdf",
+            doi="",
+            arxiv_id="2603.00001",
+            venue="arXiv",
+            year=2026,
+            categories=["cs.CL"],
+            summary_text=(
+                "The paper proposes prompt highlighting for large language models, evaluates on BiasBios, "
+                "CounterFact, and Pronoun Change, and focuses on key/value steering rather than low-level "
+                "system implementation."
+            ),
+            summary_basis="llm+pdf+metadata",
+            tags=[],
+            pdf_local_path="artifacts/pdfs/prism.pdf",
+            pdf_status="downloaded",
+            pdf_downloaded_at="2026-03-02T00:00:00+08:00",
+            fulltext_txt_path="artifacts/text/prism.txt",
+            fulltext_excerpt="",
+            fulltext_status="extracted",
+            page_count=12,
+            llm_summary={"problem": "prompt highlighting", "application": "BiasBios and CounterFact"},
+            analysis_updated_at="2026-03-02T00:00:00+08:00",
+            source_first="arxiv",
+            created_at="2026-03-02T00:00:00+08:00",
+            last_seen_at="2026-03-02T00:00:00+08:00",
+            metadata={},
+        )
+
+        evaluation = evaluate_paper_against_topic(paper, topic)
+        self.assertEqual(evaluation.classification, "irrelevant")
+        self.assertTrue(any("摘要级二次重评分" in reason for reason in evaluation.reasons))
+
+    def test_ai_topic_summary_rerank_promotes_kernel_runtime_paper(self) -> None:
+        settings = load_settings(FIXTURE_CONFIG_IKUN)
+        topic = next(item for item in settings.topics if item.id == "ai_operator_acceleration")
+
+        paper = PaperRecord(
+            id=245,
+            title="FlashDecoding++: Faster Large Language Model Inference with Asynchronization, Flat GEMM Optimization, and Heuristics.",
+            title_norm="flashdecoding",
+            abstract=(
+                "We accelerate LLM inference with asynchronous softmax, flat GEMM, and heuristic dataflow."
+            ),
+            authors=["Alice"],
+            published_at="2026-03-01T00:00:00+08:00",
+            updated_at="2026-03-01T00:00:00+08:00",
+            primary_url="https://example.com/flashdecoding",
+            pdf_url="https://example.com/flashdecoding.pdf",
+            doi="",
+            arxiv_id="2603.00002",
+            venue="arXiv",
+            year=2026,
+            categories=["cs.DC", "cs.LG"],
+            summary_text=(
+                "The paper implements asynchronous softmax and flat GEMM kernels for LLM inference, "
+                "adds Tensor Core-aware tiling and runtime heuristics, and reports latency and throughput "
+                "speedups on A100 and MI210."
+            ),
+            summary_basis="llm+pdf+metadata",
+            tags=[],
+            pdf_local_path="artifacts/pdfs/flashdecoding.pdf",
+            pdf_status="downloaded",
+            pdf_downloaded_at="2026-03-02T00:00:00+08:00",
+            fulltext_txt_path="artifacts/text/flashdecoding.txt",
+            fulltext_excerpt="",
+            fulltext_status="extracted",
+            page_count=14,
+            llm_summary={"method": "kernel and runtime optimization", "results": "throughput speedups"},
+            analysis_updated_at="2026-03-02T00:00:00+08:00",
+            source_first="arxiv",
+            created_at="2026-03-02T00:00:00+08:00",
+            last_seen_at="2026-03-02T00:00:00+08:00",
+            metadata={},
+        )
+
+        evaluation = evaluate_paper_against_topic(paper, topic)
+        self.assertEqual(evaluation.classification, "relevant")
+        self.assertGreaterEqual(evaluation.score, topic.threshold)
+        self.assertTrue(any("摘要体现内核/编译器/系统实现" in reason for reason in evaluation.reasons))
+
     def test_ai_topic_rejects_tensorgalerkin_pde_system_paper(self) -> None:
         settings = load_settings(FIXTURE_CONFIG_IKUN)
         topic = next(item for item in settings.topics if item.id == "ai_operator_acceleration")

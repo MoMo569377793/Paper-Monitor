@@ -31,6 +31,224 @@ def _keyword_group_matches(group: list[str], text: str) -> list[str]:
     return [keyword for keyword in group if keyword_in_text(keyword, text)]
 
 
+def _summary_text_for_scoring(summary_text: str, llm_summary: dict[str, Any] | None) -> str:
+    parts: list[str] = [summary_text or ""]
+    if isinstance(llm_summary, dict):
+        for key in ("overview", "problem", "method", "results", "application"):
+            value = llm_summary.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, list):
+                parts.extend(str(item) for item in value[:8] if isinstance(item, str))
+    return normalize_title(" ".join(part for part in parts if part))
+
+
+def _summary_keyword_hits(keywords: list[str], text: str) -> list[str]:
+    return [keyword for keyword in keywords if keyword_in_text(keyword, text)]
+
+
+def _summary_rerank_signal(
+    topic: TopicConfig,
+    *,
+    summary_text: str,
+    summary_basis: str,
+    llm_summary: dict[str, Any] | None,
+) -> tuple[float, list[str], bool]:
+    text = _summary_text_for_scoring(summary_text, llm_summary)
+    if not text:
+        return 0.0, [], False
+
+    reasons: list[str] = []
+    score = 0.0
+    force_irrelevant = False
+    summary_basis_value = str(summary_basis or "").strip().lower()
+
+    if topic.id == "matrix_free_fem":
+        core_hits = _summary_keyword_hits(
+            [
+                "matrix-free",
+                "matrix free",
+                "partial assembly",
+                "operator evaluation",
+                "operator application",
+                "sum factorization",
+                "sum-factorization",
+                "spectral element",
+                "discontinuous galerkin",
+            ],
+            text,
+        )
+        impl_hits = _summary_keyword_hits(
+            [
+                "gpu",
+                "cuda",
+                "hip",
+                "simd",
+                "vectorization",
+                "avx",
+                "roofline",
+                "throughput",
+                "benchmark",
+                "performance",
+                "kokkos",
+                "raja",
+                "openmp",
+                "multigrid",
+                "precondition",
+                "cache blocking",
+            ],
+            text,
+        )
+        cross_domain_hits = _summary_keyword_hits(
+            [
+                "large language model",
+                "llm",
+                "attention",
+                "prompt",
+                "recommendation",
+                "dehazing",
+                "photovoltaic",
+                "vision token",
+            ],
+            text,
+        )
+        if core_hits:
+            score += 6.0 + min(len(core_hits), 3)
+            reasons.append(f"摘要确认 matrix-free 主题: {', '.join(core_hits[:4])}")
+        if impl_hits:
+            score += 5.0 + min(len(impl_hits), 3)
+            reasons.append(f"摘要体现实现/性能讨论: {', '.join(impl_hits[:4])}")
+        if core_hits and impl_hits:
+            score += 3.0
+        if summary_basis_value in {"llm+pdf+metadata", "llm+fulltext+metadata"} and (core_hits or impl_hits):
+            score += 2.0
+            reasons.append(f"摘要来源加权: {summary_basis_value}")
+        if core_hits and not impl_hits and summary_basis_value in {"llm+pdf+metadata", "llm+fulltext+metadata"}:
+            force_irrelevant = True
+            reasons.append("摘要未体现实现/性能层面的讨论，判定为不符合 Matrix-Free 主题要求")
+        if cross_domain_hits and not core_hits:
+            force_irrelevant = True
+            reasons.append(f"摘要显示更像跨域误匹配: {', '.join(cross_domain_hits[:4])}")
+        return score, reasons, force_irrelevant
+
+    if topic.id == "ai_operator_acceleration":
+        impl_hits = _summary_keyword_hits(
+            [
+                "kernel",
+                "compiler",
+                "runtime",
+                "tensor core",
+                "cutlass",
+                "triton",
+                "tvm",
+                "mlir",
+                "halide",
+                "fusion",
+                "roofline",
+                "benchmark",
+                "throughput",
+                "latency",
+                "bandwidth",
+                "cuda",
+                "cublas",
+                "cudnn",
+                "vllm",
+                "serving",
+                "autotuning",
+                "tiling",
+                "scheduling",
+                "fp8",
+                "wgmma",
+                "pim",
+                "dpu",
+                "accelerator",
+                "dma",
+                "pcie",
+                "hbm",
+                "jit",
+                "sve",
+                "sme",
+                "simd",
+            ],
+            text,
+        )
+        workload_hits = _summary_keyword_hits(
+            [
+                "attention",
+                "flashattention",
+                "gemm",
+                "matmul",
+                "kv cache",
+                "llm inference",
+                "llm training",
+                "transformer",
+                "spmm",
+                "tensor core",
+            ],
+            text,
+        )
+        system_metric_hits = _summary_keyword_hits(
+            [
+                "speedup",
+                "throughput",
+                "latency",
+                "roofline",
+                "bandwidth",
+                "fps",
+                "tflops",
+                "gops",
+                "memory",
+                "end-to-end",
+            ],
+            text,
+        )
+        off_topic_hits = _summary_keyword_hits(
+            [
+                "prompt highlighting",
+                "biasbios",
+                "counterfact",
+                "pronoun change",
+                "scienceqa",
+                "textvqa",
+                "vqav2",
+                "super-resolution",
+                "image dehazing",
+                "photovoltaic",
+                "recommendation",
+                "reservoir computing",
+                "reservoir",
+                "token pruning",
+                "token reduction",
+                "multimodal",
+                "visual token",
+                "distillation",
+                "pruning",
+            ],
+            text,
+        )
+        if impl_hits:
+            score += 5.0 + min(len(impl_hits), 4)
+            reasons.append(f"摘要体现内核/编译器/系统实现: {', '.join(impl_hits[:5])}")
+        if impl_hits and workload_hits:
+            score += 4.0 + min(len(workload_hits), 3)
+            reasons.append(f"摘要体现算子/工作负载对象: {', '.join(workload_hits[:4])}")
+        if system_metric_hits:
+            score += 2.0 + min(len(system_metric_hits), 3)
+            reasons.append(f"摘要体现性能指标或系统结果: {', '.join(system_metric_hits[:4])}")
+        if summary_basis_value in {"llm+pdf+metadata", "llm+fulltext+metadata"} and (impl_hits or workload_hits):
+            score += 2.0
+            reasons.append(f"摘要来源加权: {summary_basis_value}")
+        if off_topic_hits and not impl_hits:
+            force_irrelevant = True
+            reasons.append(f"摘要显示更偏模型/任务论文而非实现优化: {', '.join(off_topic_hits[:4])}")
+        elif off_topic_hits:
+            score -= 3.0 + min(len(off_topic_hits), 3)
+            reasons.append(f"摘要包含偏算法/任务线索，适度降权: {', '.join(off_topic_hits[:4])}")
+        return score, reasons, force_irrelevant
+
+    return 0.0, [], False
+
+
 def _evaluate_required_keyword_lanes(
     lanes: list[list[list[str]]],
     text: str,
@@ -173,6 +391,9 @@ def _evaluate_topic(
     updated_at: str | None,
     year: int | None,
     topic: TopicConfig,
+    summary_text: str = "",
+    summary_basis: str = "",
+    llm_summary: dict[str, Any] | None = None,
 ) -> TopicEvaluation:
     text = _combined_text(title, abstract, venue, categories, tags)
     venue_text = normalize_title(venue)
@@ -274,9 +495,22 @@ def _evaluate_topic(
         score -= 6.0 * len(exclude_hits)
         reasons.append(f"命中排除词: {', '.join(exclude_hits[:4])}")
 
+    summary_score, summary_reasons, summary_force_irrelevant = _summary_rerank_signal(
+        topic,
+        summary_text=summary_text,
+        summary_basis=summary_basis,
+        llm_summary=llm_summary,
+    )
+    if summary_score:
+        score += summary_score
+    reasons.extend(summary_reasons)
+
     matched_keywords = unique_strings(matched_keywords)
 
-    if topic.id == "ai_operator_acceleration" and exclude_hits:
+    if summary_force_irrelevant:
+        classification = "irrelevant"
+        reasons.append("摘要级二次重评分判定为不相关")
+    elif topic.id == "ai_operator_acceleration" and exclude_hits:
         classification = "irrelevant"
         reasons.append("命中 AI 主题的算法/模型排除词，判定为不相关")
     elif missing_required_groups > 0:
@@ -316,6 +550,9 @@ def evaluate_paper_against_topic(paper: PaperRecord, topic: TopicConfig) -> Topi
         updated_at=paper.updated_at,
         year=paper.year,
         topic=topic,
+        summary_text=paper.summary_text,
+        summary_basis=paper.summary_basis,
+        llm_summary=paper.llm_summary,
     )
 
 

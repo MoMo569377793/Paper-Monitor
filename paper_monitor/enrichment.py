@@ -18,6 +18,7 @@ from paper_monitor.llm import LLMClient, looks_like_invalid_direct_pdf_summary
 from paper_monitor.llm_registry import LLMRuntimeVariant
 from paper_monitor.models import EnrichmentConfig, PaperRecord, RunStats, Settings
 from paper_monitor.progress import ProgressBar
+from paper_monitor.scoring import evaluate_paper_against_topic
 from paper_monitor.storage import Database
 from paper_monitor.summarize import build_paper_summary
 from paper_monitor.utils import (
@@ -857,6 +858,14 @@ class EnrichmentPipeline:
         else:
             summary_text, basis, tags = build_paper_summary(paper, evaluations)
             self.db.update_paper_analysis(paper.id, summary_text, basis, tags)
+
+        refreshed_paper = self.db.get_paper(paper.id)
+        if refreshed_paper.source_first != "seed":
+            existing_topic_ids = {item.topic_id for item in self.db.fetch_paper_evaluations(paper.id)}
+            for topic in self.settings.topics:
+                evaluation = evaluate_paper_against_topic(refreshed_paper, topic)
+                if evaluation.classification != "irrelevant" or topic.id in existing_topic_ids:
+                    self.db.upsert_match(paper.id, evaluation)
 
         stats.enriched += 1
 
